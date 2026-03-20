@@ -1,0 +1,64 @@
+Metadata-Version: 2.4
+Name: markets-trainer
+Version: 0.1.0
+Summary: Offline specialist-expert training pipeline that consumes findf outputs.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: catboost==1.2.7
+Requires-Dist: duckdb==1.1.3
+Requires-Dist: joblib==1.4.2
+Requires-Dist: lightgbm==4.5.0
+Requires-Dist: numpy==1.26.4
+Requires-Dist: pandas==2.2.3
+Requires-Dist: pyarrow==18.0.0
+Requires-Dist: scikit-learn==1.5.2
+Requires-Dist: scipy==1.14.1
+Provides-Extra: dev
+Requires-Dist: pytest==8.4.2; extra == "dev"
+Provides-Extra: nlp
+Requires-Dist: sympy==1.13.1; extra == "nlp"
+Requires-Dist: torch==2.5.1; extra == "nlp"
+Requires-Dist: transformers==4.46.3; extra == "nlp"
+
+# markets-trainer
+
+Offline training pipeline for specialist-expert equity models built on top of `findf` output artifacts.
+
+## What It Does
+
+- Imports completed `findf` jobs by `job_id`
+- Validates the `findf` `silver` contract for prices, news, and macro data
+- Scores news with pretrained FinBERT and aggregates ticker-day sentiment features
+- Builds canonical point-in-time daily snapshots and labels
+- Trains LightGBM and CatBoost tabular experts
+- Trains a logistic-regression fusion model from expert out-of-fold predictions
+- Saves evaluation reports, backtests, and model registry metadata locally
+
+## Quick Start
+
+```powershell
+python -m venv .venv
+. .venv\Scripts\Activate.ps1
+pip install -e .[dev]
+markets-trainer import-findf-run --job-id <job_id>
+markets-trainer build-snapshots --job-id <job_id>
+markets-trainer train-experts --snapshot-version <snapshot_version> --horizon 5d
+markets-trainer train-fusion --snapshot-version <snapshot_version> --horizon 5d
+```
+
+By default, the pipeline looks for the sibling repo at `../findf`. Override with `MARKETS_FINDF_ROOT` if needed.
+
+Use Python `3.10` or `3.11`. The dependency set is pinned to reduce `pip` backtracking during install.
+
+The base install does not require PyTorch. If you want pretrained FinBERT instead of the built-in fallback sentiment scorer, install the NLP extra:
+
+```powershell
+pip install -e .[dev,nlp]
+```
+
+## Layout
+
+- `configs/` pipeline defaults and walk-forward fold definitions
+- `src/markets_pipeline/` trainer implementation
+- `artifacts/` manifests, datasets, model outputs, reports, and registry metadata
+- `tests/` contract, snapshot, and label tests

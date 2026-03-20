@@ -1,0 +1,2 @@
+[console_scripts]
+markets-trainer = markets_pipeline.cli:main

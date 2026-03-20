@@ -1,0 +1,2 @@
+"""markets-trainer package."""
+

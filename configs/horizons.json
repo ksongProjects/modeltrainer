@@ -1,0 +1,7 @@
+{
+  "horizons": [
+    {"name": "1d", "days": 1},
+    {"name": "5d", "days": 5},
+    {"name": "10d", "days": 10}
+  ]
+}

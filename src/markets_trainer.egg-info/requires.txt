@@ -1,0 +1,17 @@
+catboost==1.2.7
+duckdb==1.1.3
+joblib==1.4.2
+lightgbm==4.5.0
+numpy==1.26.4
+pandas==2.2.3
+pyarrow==18.0.0
+scikit-learn==1.5.2
+scipy==1.14.1
+
+[dev]
+pytest==8.4.2
+
+[nlp]
+sympy==1.13.1
+torch==2.5.1
+transformers==4.46.3
