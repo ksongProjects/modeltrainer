@@ -1,2 +1,0 @@
-"""Dataset assembly and labels."""
-
