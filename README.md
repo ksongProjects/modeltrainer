@@ -1,90 +1,85 @@
-# markets-trainer
+# Quant Research Platform
 
-Offline training pipeline for specialist-expert equity models built on top of `findf` output artifacts.
+Local-first quant research platform with separate training and testing flows, a Python control plane, and a React master control panel UI.
 
-## What It Does
+## What This Repo Contains
 
-- Imports completed `findf` jobs by `job_id`
-- Validates the `findf` `silver` contract for prices, news, and macro data
-- Scores news with pretrained FinBERT and aggregates ticker-day sentiment features
-- Builds canonical point-in-time daily snapshots and labels
-- Trains LightGBM and CatBoost tabular experts
-- Trains a logistic-regression fusion model from expert out-of-fold predictions
-- Saves evaluation reports, backtests, and model registry metadata locally
+- Point-in-time synthetic daily market data generation with immutable raw files and Parquet feature sets
+- Versioned datasets, feature sets, model specs, model versions, run events, metrics, traces, and artifacts in SQLite
+- Factor standardization and composite scoring with winsorization, z-scores, sector-neutralization, and calculation traces
+- Training flow with LightGBM-style tree baseline, logistic fusion, and checkpointable MLP scaffolding
+- Testing flow with out-of-sample backtesting, risk metrics, stress testing, and paper-only execution simulation
+- Browser control panel for data, factors, training, testing, registry, and monitoring
+
+## Project Layout
+
+- `src/quant_platform/` backend API, control plane, pipeline modules, and persistence
+- `frontend/` React + Vite control panel UI
+- `specs/` planning and quantitative reference documents
+- `tests/` backend math and API integration tests
 
 ## Quick Start
+
+### 1. Install the backend
 
 ```powershell
 python -m venv .venv
 . .venv\Scripts\Activate.ps1
 pip install -e .[dev]
-markets-trainer import-findf-run --job-id <job_id>
-markets-trainer build-snapshots --job-id <job_id>
-markets-trainer train-experts --snapshot-version <snapshot_version> --horizon 5d
-markets-trainer train-fusion --snapshot-version <snapshot_version> --horizon 5d
 ```
 
-By default, the pipeline looks for the sibling repo at `../findf`. Override with `MARKETS_FINDF_ROOT` if needed.
-
-Use Python `3.10` or `3.11`. The dependency set is pinned to reduce `pip` backtracking during install.
-
-The base install does not require PyTorch. If you want pretrained FinBERT instead of the built-in fallback sentiment scorer, install the NLP extra:
+Optional ML extras:
 
 ```powershell
-pip install -e .[dev,nlp]
+pip install -e .[dev,ml]
 ```
 
-If you want the local experiment dashboard UI, install the UI extra:
+`ml` enables LightGBM, PyTorch, and Hugging Face integrations when you want to move beyond the built-in fallbacks.
+
+### 2. Start the API
 
 ```powershell
-pip install -e .[dev,ui]
+python -m quant_platform.main
 ```
 
-If you want both the dashboard and pretrained FinBERT:
+Or use the script entry point:
 
 ```powershell
-pip install -e .[dev,ui,nlp]
+quant-platform-api
 ```
 
-## Run the Pipeline
+The backend listens on `http://127.0.0.1:8000`.
 
-Use an existing `findf` job id:
+### 3. Start the UI
 
 ```powershell
-markets-trainer import-findf-run --job-id a04c733e-d589-4b7d-a2dd-07a21d1430a7
-markets-trainer build-snapshots --job-id a04c733e-d589-4b7d-a2dd-07a21d1430a7
-markets-trainer train-experts --snapshot-version a04c733e-d589-4b7d-a2dd-07a21d1430a7_v1_daily_specialists --horizon 5d
-markets-trainer train-fusion --snapshot-version a04c733e-d589-4b7d-a2dd-07a21d1430a7_v1_daily_specialists --horizon 5d
+cd frontend
+npm install
+npm run dev
 ```
 
-## Run the Dashboard
+The Vite UI runs on `http://127.0.0.1:5173` and talks to the backend at `http://127.0.0.1:8000` by default.
 
-After training has produced artifacts, start the dashboard:
+If you need to point the UI elsewhere:
 
 ```powershell
-markets-dashboard
+$env:VITE_API_BASE_URL="http://127.0.0.1:8000"
+npm run dev
 ```
 
-The dashboard shows:
+## API Highlights
 
-- imported `findf` runs
-- snapshot metadata
-- model registry entries
-- out-of-fold predictions
-- simple equity curves
-- promoted model state
+- `POST /api/datasets` builds a PIT dataset
+- `POST /api/features` materializes a feature store version
+- `POST /api/training-runs` starts training
+- `POST /api/testing-runs` starts testing
+- `GET /api/runs/{kind}/{id}/events` lists structured run events
+- `GET /api/runs/{kind}/{id}/metrics` lists metrics
+- `GET /api/runs/{kind}/{id}/traces` lists formula and calculation traces
+- `GET /api/stream/{kind}/{id}` streams live events over SSE
 
-## Tune Model Iterations
+## Notes
 
-Tabular and fusion model parameters live in:
-
-- `configs/model_params.json`
-
-Update that file, rerun training, and compare runs in the dashboard.
-
-## Layout
-
-- `configs/` pipeline defaults and walk-forward fold definitions
-- `src/markets_pipeline/` trainer implementation
-- `artifacts/` manifests, datasets, model outputs, reports, and registry metadata
-- `tests/` contract, snapshot, and label tests
+- The current implementation is optimized for daily OHLCV plus timestamped news, macro, and event factors.
+- Testing is paper-only and uses execution simulation instead of live order routing.
+- The repo seeds a deterministic synthetic datasource so the full workflow is runnable without external vendors.
