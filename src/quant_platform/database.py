@@ -24,7 +24,17 @@ SCHEMA_STATEMENTS = [
         name TEXT NOT NULL,
         source_id TEXT NOT NULL,
         status TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
         summary_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS saved_dataset_tags (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -185,6 +195,12 @@ SCHEMA_STATEMENTS = [
     """,
 ]
 
+COLUMN_MIGRATIONS = {
+    "dataset_versions": {
+        "tags_json": "TEXT NOT NULL DEFAULT '[]'",
+    },
+}
+
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -201,7 +217,19 @@ def init_db() -> None:
     with connect() as connection:
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
+        for table, columns in COLUMN_MIGRATIONS.items():
+            _ensure_columns(connection, table, columns)
         connection.commit()
+
+
+def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    for column_name, definition in columns.items():
+        if column_name not in existing_columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {definition}")
 
 
 @contextmanager

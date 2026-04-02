@@ -68,7 +68,7 @@ def bootstrap_drawdown_distribution(
 def cholesky_stress(returns_frame: pd.DataFrame, shock_correlation: float = 0.8) -> dict[str, float]:
     if returns_frame.shape[1] < 2:
         return {"stressed_joint_loss": float(-returns_frame.mean().abs().sum())}
-    corr = returns_frame.corr().fillna(0.0).to_numpy()
+    corr = returns_frame.corr().fillna(0.0).to_numpy(copy=True)
     corr[:] = shock_correlation
     np.fill_diagonal(corr, 1.0)
     chol = np.linalg.cholesky(corr)

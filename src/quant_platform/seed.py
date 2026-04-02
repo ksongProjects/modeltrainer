@@ -33,6 +33,14 @@ def seed_defaults() -> None:
                     "description": "Deterministic local dataset for OHLCV, events, macro, and factor demos.",
                     "config_json": json.dumps({"granularity": "daily", "events": True}),
                     "created_at": now,
+                },
+                {
+                    "id": "source_findf_parquet",
+                    "name": "findf Parquet PIT Import",
+                    "kind": "parquet_import",
+                    "description": "Local parquet import path for point-in-time datasets emitted by findf.",
+                    "config_json": json.dumps({"format": "parquet", "ingest_mode": "local_path"}),
+                    "created_at": now,
                 }
             ],
         )

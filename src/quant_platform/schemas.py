@@ -11,6 +11,18 @@ class DatasetCreateRequest(BaseModel):
     num_tickers: int = Field(default=48, ge=10, le=500)
     num_days: int = Field(default=320, ge=120, le=2000)
     seed: int = 7
+    tags: list[str] = Field(default_factory=list)
+
+
+class DatasetImportRequest(BaseModel):
+    path: str
+    name: str | None = None
+    source_id: str = "source_findf_parquet"
+    tags: list[str] = Field(default_factory=list)
+
+
+class SavedDatasetTagRequest(BaseModel):
+    name: str
 
 
 class FeatureMaterializationRequest(BaseModel):

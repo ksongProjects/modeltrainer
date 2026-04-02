@@ -9,7 +9,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from .schemas import DatasetCreateRequest, FeatureMaterializationRequest, RunOverrideRequest, TestingRunRequest, TrainingRunRequest
+from .schemas import (
+    DatasetCreateRequest,
+    DatasetImportRequest,
+    FeatureMaterializationRequest,
+    RunOverrideRequest,
+    SavedDatasetTagRequest,
+    TestingRunRequest,
+    TrainingRunRequest,
+)
 from .services.control_plane import ControlPlane
 
 app = FastAPI(title="Quant Research Platform", version="0.1.0")
@@ -43,9 +51,38 @@ def list_datasets():
     return control_plane.list_datasets()
 
 
+@app.get("/api/dataset-tags")
+def list_dataset_tags():
+    return control_plane.list_dataset_tags()
+
+
+@app.post("/api/dataset-tags")
+def create_dataset_tag(request: SavedDatasetTagRequest):
+    try:
+        return control_plane.create_dataset_tag(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/dataset-tags/{tag_id}")
+def delete_dataset_tag(tag_id: str):
+    try:
+        return control_plane.delete_dataset_tag(tag_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/api/datasets")
 def create_dataset(request: DatasetCreateRequest):
     return control_plane.create_dataset_version(request)
+
+
+@app.post("/api/datasets/import-parquet")
+def import_dataset(request: DatasetImportRequest):
+    try:
+        return control_plane.import_dataset_version(request)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/features")

@@ -5,14 +5,22 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..database import connect, init_db, utcnow
-from ..pipeline.data import build_synthetic_dataset
+from ..pipeline.data import build_synthetic_dataset, import_parquet_dataset
 from ..pipeline.features import materialize_features
 from ..pipeline.testing import run_testing_suite
 from ..pipeline.training import train_model
-from ..schemas import DatasetCreateRequest, FeatureMaterializationRequest, TestingRunRequest, TrainingRunRequest
+from ..schemas import (
+    DatasetCreateRequest,
+    DatasetImportRequest,
+    FeatureMaterializationRequest,
+    SavedDatasetTagRequest,
+    TestingRunRequest,
+    TrainingRunRequest,
+)
 from ..seed import seed_defaults
 
 
@@ -55,7 +63,14 @@ class ControlPlane:
         }
 
     def list_datasets(self) -> list[dict[str, Any]]:
-        return self._list_table("dataset_versions")
+        return [self._enrich_dataset_record(dataset) for dataset in self._list_table("dataset_versions")]
+
+    def list_dataset_tags(self) -> list[dict[str, Any]]:
+        with connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM saved_dataset_tags ORDER BY name COLLATE NOCASE ASC"
+            ).fetchall()
+        return [self._deserialize_row(row) for row in rows]
 
     def list_feature_sets(self) -> list[dict[str, Any]]:
         return self._list_table("feature_set_versions")
@@ -71,6 +86,7 @@ class ControlPlane:
 
     def create_dataset_version(self, request: DatasetCreateRequest) -> dict[str, Any]:
         dataset_id = self._new_id("dataset")
+        tags = self._normalize_tags(request.tags)
         result = build_synthetic_dataset(
             dataset_id=dataset_id,
             name=request.name,
@@ -83,12 +99,68 @@ class ControlPlane:
             "name": request.name,
             "source_id": request.source_id,
             "status": "completed",
+            "tags_json": json.dumps(tags),
             "summary_json": json.dumps(result.summary),
             "created_at": utcnow(),
             "updated_at": utcnow(),
         }
         self._insert("dataset_versions", record)
+        return self._enrich_dataset_record(self._deserialize_record(record))
+
+    def import_dataset_version(self, request: DatasetImportRequest) -> dict[str, Any]:
+        dataset_id = self._new_id("dataset")
+        tags = self._normalize_tags(request.tags)
+        result = import_parquet_dataset(
+            dataset_id=dataset_id,
+            source_path=request.path,
+            name=request.name,
+        )
+        record = {
+            "id": dataset_id,
+            "name": request.name or Path(request.path).stem,
+            "source_id": request.source_id,
+            "status": "completed",
+            "tags_json": json.dumps(tags),
+            "summary_json": json.dumps(result.summary),
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+        }
+        self._insert("dataset_versions", record)
+        return self._enrich_dataset_record(self._deserialize_record(record))
+
+    def create_dataset_tag(self, request: SavedDatasetTagRequest) -> dict[str, Any]:
+        tag_name = self._normalize_tag_name(request.name)
+        normalized_name = tag_name.casefold()
+        with connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM saved_dataset_tags WHERE normalized_name = ?",
+                (normalized_name,),
+            ).fetchone()
+            if existing is not None:
+                return self._deserialize_row(existing)
+
+            record = {
+                "id": self._new_id("tag"),
+                "name": tag_name,
+                "normalized_name": normalized_name,
+                "created_at": utcnow(),
+                "updated_at": utcnow(),
+            }
+            columns = ", ".join(record.keys())
+            placeholders = ", ".join("?" for _ in record)
+            connection.execute(
+                f"INSERT INTO saved_dataset_tags ({columns}) VALUES ({placeholders})",
+                tuple(record.values()),
+            )
+            connection.commit()
         return self._deserialize_record(record)
+
+    def delete_dataset_tag(self, tag_id: str) -> dict[str, Any]:
+        deleted = self._get_table_row("saved_dataset_tags", tag_id)
+        with connect() as connection:
+            connection.execute("DELETE FROM saved_dataset_tags WHERE id = ?", (tag_id,))
+            connection.commit()
+        return deleted
 
     def create_feature_set_version(self, request: FeatureMaterializationRequest) -> dict[str, Any]:
         feature_set_id = self._new_id("features")
@@ -565,3 +637,124 @@ class ControlPlane:
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+    def _enrich_dataset_record(self, dataset: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(dataset)
+        manual_source = enriched.get("manual_tags", enriched.get("tags"))
+        manual_tags = self._normalize_tags(manual_source)
+        auto_tags = self._derive_dataset_auto_tags(enriched)
+        enriched["manual_tags"] = manual_tags
+        enriched["auto_tags"] = auto_tags
+        enriched["tags"] = self._normalize_tags([*manual_tags, *auto_tags])
+        return enriched
+
+    def _derive_dataset_auto_tags(self, dataset: dict[str, Any]) -> list[str]:
+        summary = dataset.get("summary") if isinstance(dataset.get("summary"), dict) else {}
+        schema = summary.get("schema") if isinstance(summary, dict) and isinstance(summary.get("schema"), dict) else {}
+        required_columns = schema.get("required_columns") if isinstance(schema.get("required_columns"), list) else []
+        optional_columns = schema.get("optional_columns_present") if isinstance(schema.get("optional_columns_present"), list) else []
+        extra_columns = schema.get("extra_columns") if isinstance(schema.get("extra_columns"), list) else []
+        column_names = {str(column) for column in [*required_columns, *optional_columns, *extra_columns]}
+
+        if not column_names:
+            source_id = str(dataset.get("source_id") or "")
+            if source_id in {"source_synthetic", "source_findf_parquet"}:
+                column_names = {
+                    "entity_id",
+                    "ticker",
+                    "sector",
+                    "effective_at",
+                    "known_at",
+                    "ingested_at",
+                    "source_version",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "ev_ebitda",
+                    "roic",
+                    "momentum_20d",
+                    "momentum_60d",
+                    "sentiment_1d",
+                    "sentiment_5d",
+                    "macro_surprise",
+                    "earnings_signal",
+                    "macro_rate",
+                }
+
+        auto_tags: list[str] = []
+        tag_columns = {
+            "pit": {"effective_at", "known_at", "ingested_at"},
+            "ohlcv": {"open", "high", "low", "close", "volume"},
+            "fundamental": {"ev_ebitda", "roic"},
+            "momentum": {"momentum_20d", "momentum_60d"},
+            "sentiment": {"sentiment_1d", "sentiment_5d"},
+            "macro": {"macro_surprise", "macro_rate"},
+            "event": {"earnings_signal"},
+        }
+        for tag_name, required in tag_columns.items():
+            if required.intersection(column_names) == required or (tag_name in {"fundamental", "momentum", "sentiment", "macro", "event"} and required.intersection(column_names)):
+                auto_tags.append(tag_name)
+
+        ticker_count = summary.get("tickers")
+        if isinstance(ticker_count, (int, float)):
+            ticker_count_int = int(ticker_count)
+            if ticker_count_int <= 1:
+                auto_tags.append("single-ticker")
+            else:
+                auto_tags.append("multi-ticker")
+                if ticker_count_int <= 10:
+                    auto_tags.append("micro-universe")
+                elif ticker_count_int <= 50:
+                    auto_tags.append("small-universe")
+                elif ticker_count_int <= 200:
+                    auto_tags.append("mid-universe")
+                else:
+                    auto_tags.append("broad-universe")
+
+        sample_tickers = summary.get("sample_tickers") if isinstance(summary.get("sample_tickers"), list) else []
+        if isinstance(ticker_count, (int, float)) and int(ticker_count) <= 5:
+            auto_tags.extend(f"ticker:{str(ticker).upper()}" for ticker in sample_tickers)
+
+        sectors = summary.get("sectors") if isinstance(summary.get("sectors"), list) else []
+        if len(sectors) == 1:
+            sector_name = str(sectors[0]).strip().lower().replace(" ", "-")
+            if sector_name:
+                auto_tags.append(f"sector:{sector_name}")
+        elif len(sectors) > 1:
+            auto_tags.append("multi-sector")
+
+        source_id = str(dataset.get("source_id") or "")
+        source_tags = {
+            "source_synthetic": "synthetic",
+            "source_findf_parquet": "parquet-import",
+        }
+        if source_id in source_tags:
+            auto_tags.append(source_tags[source_id])
+
+        return self._normalize_tags(auto_tags)
+
+    def _normalize_tags(self, tags: list[str] | None) -> list[str]:
+        if not tags:
+            return []
+
+        normalized_tags: list[str] = []
+        seen: set[str] = set()
+        for raw_tag in tags:
+            tag_name = " ".join(str(raw_tag).split())
+            if not tag_name:
+                continue
+            tag_name = tag_name[:64]
+            tag_key = tag_name.casefold()
+            if tag_key in seen:
+                continue
+            seen.add(tag_key)
+            normalized_tags.append(tag_name)
+        return normalized_tags
+
+    def _normalize_tag_name(self, tag: str) -> str:
+        normalized = " ".join(str(tag).split())
+        if not normalized:
+            raise ValueError("Tag name cannot be empty.")
+        return normalized[:64]

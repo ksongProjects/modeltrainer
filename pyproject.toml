@@ -7,7 +7,7 @@ name = "quant-research-platform"
 version = "0.1.0"
 description = "Local-first quant research platform with training, testing, risk, and monitoring flows."
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.10,<3.13"
 dependencies = [
   "duckdb>=1.1.3",
   "fastapi>=0.115.0",

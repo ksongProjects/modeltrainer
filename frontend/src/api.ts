@@ -21,5 +21,9 @@ export const api = {
     request<T>(path, {
       method: "POST",
       body: body ? JSON.stringify(body) : undefined
+    }),
+  delete: <T,>(path: string) =>
+    request<T>(path, {
+      method: "DELETE"
     })
 };
