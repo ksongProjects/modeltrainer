@@ -8,6 +8,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from quant_platform.main import app
+from tests.support import write_news_events_parquet, write_realistic_parquet
 
 
 client = TestClient(app)
@@ -25,49 +26,8 @@ def _wait_for_state(path: str, terminal_states: set[str], timeout_seconds: float
         time.sleep(0.5)
     raise AssertionError(f"Run did not reach terminal state before timeout: {latest}")
 
-
-def _write_realistic_parquet(path: Path) -> None:
-    dates = pd.bdate_range("2025-01-02", periods=140)
-    tickers = [
-        ("AAA", "eq_0001", "Technology", 80.0),
-        ("BBB", "eq_0002", "Financials", 42.0),
-        ("CCC", "eq_0003", "Health Care", 61.0),
-        ("DDD", "eq_0004", "Industrials", 55.0),
-    ]
-    rows: list[dict[str, object]] = []
-    for ticker_index, (ticker, entity_id, sector, base_price) in enumerate(tickers):
-        for day_index, effective_at in enumerate(dates):
-            close = base_price + day_index * (0.14 + ticker_index * 0.02)
-            rows.append(
-                {
-                    "entity_id": entity_id,
-                    "ticker": ticker,
-                    "sector": sector,
-                    "effective_at": effective_at.isoformat(),
-                    "known_at": (effective_at + pd.Timedelta(hours=16, minutes=5)).isoformat(),
-                    "ingested_at": (effective_at + pd.Timedelta(hours=18)).isoformat(),
-                    "source_version": "findf_v1",
-                    "open": close - 0.35,
-                    "high": close + 0.7,
-                    "low": close - 0.9,
-                    "close": close,
-                    "volume": 120_000 + (day_index * 900) + (ticker_index * 1_500),
-                    "ev_ebitda": 8.0 + ticker_index + (day_index % 5) * 0.15,
-                    "roic": 0.08 + ticker_index * 0.01 + (day_index % 7) * 0.001,
-                    "momentum_20d": (day_index % 20) * 0.004,
-                    "momentum_60d": (day_index % 60) * 0.002,
-                    "sentiment_1d": ((day_index % 5) - 2) * 0.05,
-                    "sentiment_5d": ((day_index % 7) - 3) * 0.04,
-                    "macro_surprise": ((day_index % 9) - 4) * 0.02,
-                    "earnings_signal": 0.06 if day_index % 30 == 0 else 0.0,
-                    "macro_rate": 4.5,
-                }
-            )
-    pd.DataFrame(rows).to_parquet(path, index=False)
-
-
 def _write_parquet_with_gaps_and_duplicates(path: Path) -> None:
-    _write_realistic_parquet(path)
+    write_realistic_parquet(path)
     frame = pd.read_parquet(path)
     missing_row_index = frame.index[(frame["ticker"] == "BBB") & (frame["effective_at"] == "2025-01-16T00:00:00")][0]
     duplicate_row = frame.loc[(frame["ticker"] == "AAA") & (frame["effective_at"] == "2025-01-21T00:00:00")].iloc[[0]]
@@ -77,7 +37,8 @@ def _write_parquet_with_gaps_and_duplicates(path: Path) -> None:
 
 def test_import_parquet_dataset_and_materialize_features(tmp_path: Path) -> None:
     parquet_path = tmp_path / "findf_snapshot.parquet"
-    _write_realistic_parquet(parquet_path)
+    write_realistic_parquet(parquet_path)
+    write_news_events_parquet(tmp_path / "news_events.parquet")
 
     saved_tag_response = client.post("/api/dataset-tags", json={"name": "production"})
     assert saved_tag_response.status_code == 200
@@ -104,6 +65,7 @@ def test_import_parquet_dataset_and_materialize_features(tmp_path: Path) -> None
     assert dataset["summary"]["assessment"]["status"] == "healthy"
     assert dataset["summary"]["assessment"]["gaps"]["missing_sessions"] == 0
     assert dataset["summary"]["assessment"]["gaps"]["duplicate_key_rows"] == 0
+    assert dataset["summary"]["news_events"]["rows"] > 0
 
     saved_tags = client.get("/api/dataset-tags")
     assert saved_tags.status_code == 200
@@ -152,11 +114,24 @@ def test_import_parquet_dataset_surfaces_gaps_and_duplicates(tmp_path: Path) -> 
     assert any(issue["title"] == "Duplicate entity-date keys" for issue in assessment["issues"])
 
 
-def test_end_to_end_training_and_testing_flow() -> None:
+def test_synthetic_dataset_creation_is_disabled() -> None:
     dataset_response = client.post("/api/datasets", json={})
+    assert dataset_response.status_code == 400
+    assert "disabled" in dataset_response.json()["detail"].lower()
+
+
+def test_end_to_end_training_and_testing_flow(tmp_path: Path) -> None:
+    parquet_path = tmp_path / "e2e_snapshot.parquet"
+    write_realistic_parquet(parquet_path)
+    write_news_events_parquet(tmp_path / "news_events.parquet")
+
+    dataset_response = client.post(
+        "/api/datasets/import-parquet",
+        json={"path": str(parquet_path), "name": "E2E Import"},
+    )
     assert dataset_response.status_code == 200
     dataset = dataset_response.json()
-    assert {"synthetic", "ohlcv", "fundamental", "momentum", "sentiment", "macro", "event", "multi-ticker"}.issubset(set(dataset["tags"]))
+    assert {"parquet-import", "ohlcv", "fundamental", "momentum", "sentiment", "macro", "event", "multi-ticker"}.issubset(set(dataset["tags"]))
     assert dataset["summary"]["assessment"]["data_level"] == "high"
 
     feature_response = client.post("/api/features", json={"dataset_version_id": dataset["id"]})
@@ -201,6 +176,22 @@ def test_end_to_end_training_and_testing_flow() -> None:
     assert events
     assert any(metric["name"] == "sharpe" for metric in metrics)
     assert traces
+
+    visualization = client.get(
+        f"/api/datasets/{dataset['id']}/visualization",
+        params={
+            "ticker": "AAA",
+            "feature_set_version_id": feature_set["id"],
+            "model_version_id": model_version["id"],
+        },
+    )
+    assert visualization.status_code == 200
+    payload = visualization.json()
+    assert payload["ticker"] == "AAA"
+    assert payload["price_series"]
+    assert payload["prediction_series"]
+    assert any(item["event_scope"] == "ticker" for item in payload["news_events"])
+    assert any(item["category"] == "earnings" for item in payload["event_markers"])
 
 
 def test_runtime_self_check_endpoint_runs_smoke_probe() -> None:

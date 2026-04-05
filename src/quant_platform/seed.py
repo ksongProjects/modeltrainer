@@ -47,14 +47,6 @@ def seed_defaults() -> None:
             "data_sources",
             [
                 {
-                    "id": "source_synthetic",
-                    "name": "Synthetic Daily + Events",
-                    "kind": "synthetic",
-                    "description": "Deterministic local dataset for OHLCV, events, macro, and factor demos.",
-                    "config_json": json.dumps({"granularity": "daily", "events": True}),
-                    "created_at": now,
-                },
-                {
                     "id": "source_findf_parquet",
                     "name": "findf Parquet PIT Import",
                     "kind": "parquet_import",

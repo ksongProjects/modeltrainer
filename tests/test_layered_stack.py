@@ -10,6 +10,7 @@ from quant_platform.research_layers import (
     LAYER_PRICE_SIGNAL,
     LAYER_SENTIMENT_SIGNAL,
 )
+from tests.support import write_news_events_parquet, write_realistic_parquet
 
 client = TestClient(app)
 
@@ -27,8 +28,14 @@ def _wait_for_state(path: str, terminal_states: set[str], timeout_seconds: float
     raise AssertionError(f"Run did not reach terminal state before timeout: {latest}")
 
 
-def test_layered_decision_training_and_testing_flow() -> None:
-    dataset = client.post("/api/datasets", json={"name": "Layered Stack Dataset"}).json()
+def test_layered_decision_training_and_testing_flow(tmp_path) -> None:
+    parquet_path = tmp_path / "layered_stack.parquet"
+    write_realistic_parquet(parquet_path)
+    write_news_events_parquet(tmp_path / "news_events.parquet")
+    dataset = client.post(
+        "/api/datasets/import-parquet",
+        json={"name": "Layered Stack Dataset", "path": str(parquet_path)},
+    ).json()
     assert dataset["summary"]["news_events"]["rows"] > 0
     feature_set = client.post(
         "/api/features",

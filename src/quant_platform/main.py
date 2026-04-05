@@ -123,7 +123,10 @@ def delete_dataset_tag(tag_id: str):
 
 @app.post("/api/datasets")
 def create_dataset(request: DatasetCreateRequest):
-    return control_plane.create_dataset_version(request)
+    try:
+        return control_plane.create_dataset_version(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/datasets/import-parquet")
@@ -131,6 +134,26 @@ def import_dataset(request: DatasetImportRequest):
     try:
         return control_plane.import_dataset_version(request)
     except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/datasets/{dataset_version_id}/visualization")
+def dataset_visualization(
+    dataset_version_id: str,
+    ticker: str | None = None,
+    feature_set_version_id: str | None = None,
+    model_version_id: str | None = None,
+):
+    try:
+        return control_plane.dataset_visualization(
+            dataset_version_id=dataset_version_id,
+            ticker=ticker,
+            feature_set_version_id=feature_set_version_id,
+            model_version_id=model_version_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -172,7 +195,10 @@ def list_training_runs():
 
 @app.post("/api/training-runs")
 def start_training_run(request: TrainingRunRequest):
-    return control_plane.start_training_run(request)
+    try:
+        return control_plane.start_training_run(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/training-runs/{run_id}")

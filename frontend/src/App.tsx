@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "./api";
+import { DatasetChart } from "./DatasetChart";
 import { DashboardLayout } from "./DashboardLayout";
 import type { JsonRecord, OverviewResponse } from "./types";
 
@@ -18,6 +19,18 @@ const tabs = [
 ];
 
 const PANEL_COLLAPSE_STORAGE_KEY = "quant-platform-panel-collapse:workspace";
+const chartWindowOptions = ["3M", "6M", "1Y", "Full"];
+const chartBaseOverlays = [
+  { key: "price", label: "Price" },
+  { key: "volume", label: "Volume" },
+  { key: "predicted", label: "Predicted Return" },
+  { key: "actual", label: "Realized Forward Return" },
+  { key: "news", label: "Ticker News" },
+  { key: "macro_news", label: "Macro News" },
+  { key: "earnings", label: "Earnings" },
+  { key: "macro_surprise", label: "Macro Surprise" },
+  { key: "sentiment_shock", label: "Sentiment Shock" }
+];
 
 function loadCollapsedPanelMap(storageKey: string): Record<string, boolean> {
   if (typeof window === "undefined") {
@@ -436,6 +449,24 @@ export default function App() {
   const [savedDatasetTags, setSavedDatasetTags] = useState<JsonRecord[]>([]);
   const [newSavedTagName, setNewSavedTagName] = useState("");
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
+  const [chartTicker, setChartTicker] = useState("");
+  const [chartFeatureSetId, setChartFeatureSetId] = useState("");
+  const [chartModelId, setChartModelId] = useState("");
+  const [chartWindow, setChartWindow] = useState("6M");
+  const [chartPayload, setChartPayload] = useState<JsonRecord | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState<string | null>(null);
+  const [chartOverlays, setChartOverlays] = useState<Record<string, boolean>>({
+    price: true,
+    volume: false,
+    predicted: true,
+    actual: true,
+    news: true,
+    macro_news: true,
+    earnings: true,
+    macro_surprise: true,
+    sentiment_shock: false
+  });
   const [featureDatasetId, setFeatureDatasetId] = useState("");
   const [selectedLayerId, setSelectedLayerId] = useState("");
   const [trainingForm, setTrainingForm] = useState({
@@ -597,6 +628,12 @@ export default function App() {
   }, [datasets]);
 
   useEffect(() => {
+    setChartTicker("");
+    setChartPayload(null);
+    setChartError(null);
+  }, [selectedDatasetId]);
+
+  useEffect(() => {
     setFeatureDatasetId((current) => (current && datasets.some((dataset) => dataset.id === current) ? current : String(datasets[0]?.id ?? "")));
   }, [datasets]);
 
@@ -667,15 +704,17 @@ export default function App() {
     [researchLayers, selectedLayerId]
   );
 
-  async function createDataset() {
-    await api.post("/api/datasets", {});
-    refresh();
-  }
-
   function toggleImportTag(tagName: string) {
     setSelectedImportTags((current) =>
       current.includes(tagName) ? current.filter((tag) => tag !== tagName) : [...current, tagName]
     );
+  }
+
+  function toggleChartOverlay(overlayKey: string) {
+    setChartOverlays((current) => ({
+      ...current,
+      [overlayKey]: !current[overlayKey]
+    }));
   }
 
   async function importDataset() {
@@ -869,6 +908,33 @@ export default function App() {
         return left.name.localeCompare(right.name);
       });
   }, [selectedDatasetAssessment]);
+  const datasetFeatureOptions = useMemo(
+    () => features.filter((feature) => String(feature.dataset_version_id) === String(selectedDataset?.id ?? "")),
+    [features, selectedDataset]
+  );
+  const chartModelOptions = useMemo(() => {
+    const eligibleFeatureIds = new Set(
+      (chartFeatureSetId ? datasetFeatureOptions.filter((feature) => String(feature.id) === chartFeatureSetId) : datasetFeatureOptions).map((feature) => String(feature.id))
+    );
+    return models.filter((model) => eligibleFeatureIds.has(String(model.feature_set_version_id ?? "")));
+  }, [chartFeatureSetId, datasetFeatureOptions, models]);
+  const chartLayerScoreColumns = useMemo(
+    () => (Array.isArray(chartPayload?.layer_score_columns) ? (chartPayload.layer_score_columns as JsonRecord[]) : []),
+    [chartPayload]
+  );
+  const chartTickerOptions = useMemo(() => {
+    const payloadTickers = Array.isArray(chartPayload?.tickers) ? chartPayload.tickers : [];
+    if (payloadTickers.length) {
+      return payloadTickers.map((ticker) => String(ticker)).filter(Boolean);
+    }
+
+    const summaryTickers = Array.isArray(selectedDataset?.summary?.tickers) ? selectedDataset.summary.tickers : [];
+    return summaryTickers.map((ticker) => String(ticker)).filter(Boolean);
+  }, [chartPayload, selectedDataset]);
+  const chartPriceRowCount = Array.isArray(chartPayload?.price_series) ? chartPayload.price_series.length : 0;
+  const chartPredictionRowCount = Array.isArray(chartPayload?.prediction_series) ? chartPayload.prediction_series.length : 0;
+  const chartNewsCount = Array.isArray(chartPayload?.news_events) ? chartPayload.news_events.length : 0;
+  const chartEventCount = Array.isArray(chartPayload?.event_markers) ? chartPayload.event_markers.length : 0;
   const latestFeatureSet = features[0] ?? null;
   const latestModel = models[0] ?? null;
   const activeTrainingCount = trainingRuns.filter((run) => ["queued", "running", "paused"].includes(String(run.state))).length;
@@ -879,6 +945,89 @@ export default function App() {
   const recentEvents = [...runEvents].slice(-16).reverse();
   const recentTraces = [...runTraces].slice(-6).reverse();
   const primaryMetrics = [...runMetrics].slice(0, 6);
+  const trainingHasDataInput = Boolean(trainingForm.dataset_version_id || trainingForm.feature_set_version_id);
+
+  useEffect(() => {
+    setChartFeatureSetId((current) =>
+      current && datasetFeatureOptions.some((feature) => String(feature.id) === current) ? current : String(datasetFeatureOptions[0]?.id ?? "")
+    );
+  }, [datasetFeatureOptions]);
+
+  useEffect(() => {
+    setChartModelId((current) =>
+      current && chartModelOptions.some((model) => String(model.id) === current) ? current : String(chartModelOptions[0]?.id ?? "")
+    );
+  }, [chartModelOptions]);
+
+  useEffect(() => {
+    if (!chartLayerScoreColumns.length) {
+      return;
+    }
+
+    setChartOverlays((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      chartLayerScoreColumns.forEach((column) => {
+        const key = String(column.key ?? "");
+        if (key && !(key in next)) {
+          next[key] = true;
+          changed = true;
+        }
+      });
+
+      return changed ? next : current;
+    });
+  }, [chartLayerScoreColumns]);
+
+  useEffect(() => {
+    if (!selectedDataset) {
+      setChartPayload(null);
+      setChartError(null);
+      return;
+    }
+
+    const searchParams = new URLSearchParams();
+    if (chartTicker) {
+      searchParams.set("ticker", chartTicker);
+    }
+    if (chartFeatureSetId) {
+      searchParams.set("feature_set_version_id", chartFeatureSetId);
+    }
+    if (chartModelId) {
+      searchParams.set("model_version_id", chartModelId);
+    }
+
+    let active = true;
+    setChartLoading(true);
+    api.get<JsonRecord>(`/api/datasets/${selectedDataset.id}/visualization${searchParams.size ? `?${searchParams.toString()}` : ""}`)
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setChartPayload(payload);
+        setChartError(null);
+        if (!chartTicker && typeof payload.ticker === "string") {
+          setChartTicker(payload.ticker);
+        }
+      })
+      .catch((fetchError) => {
+        if (!active) {
+          return;
+        }
+        setChartPayload(null);
+        setChartError(fetchError instanceof Error ? fetchError.message : "Failed to load chart data.");
+      })
+      .finally(() => {
+        if (active) {
+          setChartLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [chartFeatureSetId, chartModelId, chartTicker, selectedDataset]);
 
   const datasetColumns: DenseColumn<JsonRecord>[] = [
     {
@@ -1388,27 +1537,32 @@ export default function App() {
               layoutKey="data-pipeline"
               defaultRows={[
                 ["datasets", "dataset-inspection"],
+                ["dataset-visualizer"],
                 ["feature-store", "manage-tags"]
               ]}
               panels={[
                 { id: "datasets", label: "Datasets" },
                 { id: "dataset-inspection", label: "Dataset Inspection" },
+                { id: "dataset-visualizer", label: "Dataset Visualizer" },
                 { id: "feature-store", label: "Feature Store" },
                 { id: "manage-tags", label: "Manage Tags" }
               ]}
             >
             <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <span className="panel-kicker">Foundation</span>
-                  <h2>Datasets</h2>
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">Foundation</span>
+                    <h2>Datasets</h2>
+                  </div>
                 </div>
-                <button onClick={createDataset}>Build Synthetic PIT</button>
-              </div>
               <p className="panel-copy">
-                Register immutable point-in-time snapshots here, then hand them off to the feature store without mixing
-                imported production data with local experiments.
+                Register immutable point-in-time snapshots here, then hand them off to the feature store with a clean
+                audit trail from raw parquet import through training and testing.
               </p>
+              <div className="inline-note">
+                Synthetic dataset generation is disabled. Import real parquet snapshots and optional `news_events`
+                sidecars before running feature materialization or training.
+              </div>
               <div className="import-box">
                 <strong>Import Real Parquet</strong>
                 <p>Point this at a local `.parquet` file or a directory of parquet parts emitted by `findf`.</p>
@@ -1483,7 +1637,7 @@ export default function App() {
                   onRowClick={(dataset) => setSelectedDatasetId(String(dataset.id))}
                   selectedRowId={selectedDataset ? String(selectedDataset.id) : null}
                   emptyTitle="No datasets yet"
-                  emptyBody="Build a synthetic PIT snapshot or import a `findf` parquet export to start the pipeline."
+                  emptyBody="Import a real `findf` parquet export to start the pipeline."
                   filterPlaceholder="Filter datasets by name, id, path, or tag"
                   defaultSort={{ key: "rows", direction: "desc" }}
                 />
@@ -1509,7 +1663,7 @@ export default function App() {
                       {selectedDatasetAssessment ? <StatusPill value={String(selectedDatasetAssessment.status ?? "unknown")} /> : null}
                     </div>
                     <div className="assessment-source mono-cell">
-                      {selectedDataset.summary?.artifacts?.source_path ?? selectedDataset.summary?.artifacts?.raw_path ?? "generated locally"}
+                      {selectedDataset.summary?.artifacts?.source_path ?? selectedDataset.summary?.artifacts?.raw_path ?? "source path unavailable"}
                     </div>
                     <div className="metric-grid compact">
                       <MetricCard label="Score" value={formatPercent(selectedDatasetAssessment?.score_pct)} />
@@ -1581,7 +1735,124 @@ export default function App() {
                 ) : (
                   <EmptyState
                     title="No dataset selected"
-                    body="Import or build a dataset first, then click it to inspect completeness, gap coverage, and quality checks."
+                    body="Import a real dataset first, then click it to inspect completeness, gap coverage, and quality checks."
+                  />
+                )}
+              </section>
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">Visual Explorer</span>
+                    <h2>Dataset Chart</h2>
+                  </div>
+                  {selectedDataset ? <AssessmentPill value={String(chartPayload?.assessment?.data_level ?? "ready")} /> : null}
+                </div>
+                <p className="panel-copy">
+                  Overlay price, predictions, raw news, and pricing catalysts on one timeline so you can inspect how the
+                  market moved after each event.
+                </p>
+                {selectedDataset ? (
+                  <div className="chart-panel-stack">
+                    <div className="control-form two-column">
+                      <label>
+                        <span>Ticker</span>
+                        <select value={chartTicker} onChange={(event) => setChartTicker(event.target.value)}>
+                          {chartTickerOptions.map((ticker) => (
+                            <option key={ticker} value={ticker}>
+                              {ticker}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Feature Set</span>
+                        <select value={chartFeatureSetId} onChange={(event) => setChartFeatureSetId(event.target.value)}>
+                          <option value="">Price And Events Only</option>
+                          {datasetFeatureOptions.map((feature) => (
+                            <option key={String(feature.id)} value={String(feature.id)}>
+                              {feature.name} ({shortId(feature.id)})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Model Overlay</span>
+                        <select value={chartModelId} onChange={(event) => setChartModelId(event.target.value)}>
+                          <option value="">No Model Prediction Overlay</option>
+                          {chartModelOptions.map((model) => (
+                            <option key={String(model.id)} value={String(model.id)}>
+                              {model.name} ({shortId(model.id)})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>Window</span>
+                        <select value={chartWindow} onChange={(event) => setChartWindow(event.target.value)}>
+                          {chartWindowOptions.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <div className="chart-toggle-block">
+                      <span>Overlays</span>
+                      <div className="inline-controls wrap">
+                        {chartBaseOverlays.map((overlay) => (
+                          <button
+                            key={overlay.key}
+                            type="button"
+                            className={chartOverlays[overlay.key] ? "ghost is-active-toggle" : "ghost"}
+                            onClick={() => toggleChartOverlay(overlay.key)}
+                          >
+                            {overlay.label}
+                          </button>
+                        ))}
+                        {chartLayerScoreColumns.map((column) => {
+                          const key = String(column.key ?? "");
+                          if (!key) {
+                            return null;
+                          }
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              className={chartOverlays[key] ? "ghost is-active-toggle" : "ghost"}
+                              onClick={() => toggleChartOverlay(key)}
+                            >
+                              {String(column.label ?? key)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className="metric-grid compact">
+                      <MetricCard label="Data Level" value={String(chartPayload?.assessment?.data_level ?? selectedDatasetAssessment?.data_level ?? "n/a")} />
+                      <MetricCard label="Ticker" value={String(chartPayload?.ticker ?? chartTicker ?? "n/a")} />
+                      <MetricCard label="Price Rows" value={chartPriceRowCount} />
+                      <MetricCard label="Prediction Rows" value={chartPredictionRowCount} />
+                      <MetricCard label="News Events" value={chartNewsCount} />
+                      <MetricCard label="Event Markers" value={chartEventCount} />
+                    </div>
+                    {chartLoading ? <div className="inline-note">Refreshing chart data for the selected inputs.</div> : null}
+                    {chartError ? (
+                      <EmptyState title="Chart unavailable" body={chartError} />
+                    ) : (
+                      <>
+                        <DatasetChart payload={chartPayload} overlayState={chartOverlays} windowMode={chartWindow} />
+                        <div className="inline-note">
+                          Hover news dots and event markers to inspect the headline, timestamp, and catalyst behind each
+                          move.
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <EmptyState
+                    title="No dataset selected"
+                    body="Choose an imported dataset first, then use the chart controls to compare price action, predictions, and event timing."
                   />
                 )}
               </section>
@@ -1711,6 +1982,12 @@ export default function App() {
                 Queue training jobs with explicit data, features, model kind, and hyperparameters so the control panel
                 becomes the source of truth for run instantiation.
               </p>
+              {!trainingHasDataInput ? (
+                <div className="inline-note">
+                  Synthetic fallback is disabled. Select a real dataset or an existing feature set before launching
+                  training.
+                </div>
+              ) : null}
               {runtimeCapabilities ? (
                 <div className="inline-note">
                   Runtime detects {Array.isArray(runtimeCapabilities.devices) ? runtimeCapabilities.devices.length : 0} device paths.
@@ -1741,7 +2018,7 @@ export default function App() {
                 <label>
                   <span>Dataset</span>
                   <select value={trainingForm.dataset_version_id} onChange={(event) => setTrainingForm((current) => ({ ...current, dataset_version_id: event.target.value }))}>
-                    <option value="">Auto-build synthetic dataset</option>
+                    <option value="">No dataset selected</option>
                     {datasets.map((dataset) => (
                       <option key={String(dataset.id)} value={String(dataset.id)}>
                         {formatDatasetOptionLabel(dataset)}
@@ -1818,8 +2095,9 @@ export default function App() {
                 </label>
               </div>
               <div className="metric-grid compact">
-                <MetricCard label="Selected Dataset" value={trainingForm.dataset_version_id ? shortId(trainingForm.dataset_version_id) : "auto"} />
-                <MetricCard label="Selected Features" value={trainingForm.feature_set_version_id ? shortId(trainingForm.feature_set_version_id) : "auto"} />
+                <MetricCard label="Data Input" value={trainingHasDataInput ? "ready" : "required"} />
+                <MetricCard label="Selected Dataset" value={trainingForm.dataset_version_id ? shortId(trainingForm.dataset_version_id) : "not set"} />
+                <MetricCard label="Selected Features" value={trainingForm.feature_set_version_id ? shortId(trainingForm.feature_set_version_id) : "auto from dataset"} />
                 <MetricCard label="Epoch Budget" value={trainingForm.epochs} />
                 <MetricCard label="Learning Rate" value={trainingForm.learning_rate} />
                 <MetricCard label="Compute Target" value={trainingForm.compute_target} />
@@ -2259,7 +2537,7 @@ export default function App() {
             <span>
               {latestDataset
                 ? `${pretty(latestDataset.summary?.rows)} rows loaded / ${String(latestDatasetAssessment?.data_level ?? "n/a")} data level`
-                : "Import or build a dataset"}
+                : "Import a real dataset"}
             </span>
           </article>
         <article className="command-card">

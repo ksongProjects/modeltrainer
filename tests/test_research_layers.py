@@ -14,6 +14,7 @@ from quant_platform.research_layers import (
     LAYER_SENTIMENT_SIGNAL,
     LAYER_SNAPSHOT_SIGNAL,
 )
+from tests.support import write_realistic_parquet
 
 client = TestClient(app)
 
@@ -88,8 +89,13 @@ def test_runtime_capabilities_endpoint_exposes_local_backends() -> None:
     assert "supported_compute_targets" in payload
 
 
-def test_research_layer_observability_tracks_latest_runs() -> None:
-    dataset_response = client.post("/api/datasets", json={"name": "Layer Obs Dataset"})
+def test_research_layer_observability_tracks_latest_runs(tmp_path) -> None:
+    parquet_path = tmp_path / "layer_obs.parquet"
+    write_realistic_parquet(parquet_path)
+    dataset_response = client.post(
+        "/api/datasets/import-parquet",
+        json={"name": "Layer Obs Dataset", "path": str(parquet_path)},
+    )
     assert dataset_response.status_code == 200
     dataset = dataset_response.json()
 

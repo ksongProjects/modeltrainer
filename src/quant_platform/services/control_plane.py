@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from ..database import connect, init_db, utcnow
 from ..layer_controls import (
     research_layer_control_defaults,
@@ -16,10 +18,10 @@ from ..layer_controls import (
     research_layer_runtime_catalog,
     sanitize_runtime_settings,
 )
-from ..pipeline.data import build_synthetic_dataset, import_parquet_dataset
-from ..pipeline.features import materialize_features
+from ..pipeline.data import import_parquet_dataset, load_dataset_frame, load_news_event_frame
+from ..pipeline.features import load_feature_frame, materialize_features
 from ..pipeline.testing import run_testing_suite
-from ..pipeline.training import train_model
+from ..pipeline.training import load_predictor_bundle, train_model
 from ..runtime_profiles import runtime_capabilities, runtime_self_check
 from ..research_layers import (
     LAYER_FUNDAMENTAL_SIGNAL,
@@ -99,6 +101,65 @@ class ControlPlane:
     def list_datasets(self) -> list[dict[str, Any]]:
         return [self._enrich_dataset_record(dataset) for dataset in self._list_table("dataset_versions")]
 
+    def dataset_visualization(
+        self,
+        dataset_version_id: str,
+        ticker: str | None = None,
+        feature_set_version_id: str | None = None,
+        model_version_id: str | None = None,
+    ) -> dict[str, Any]:
+        dataset = self._enrich_dataset_record(self._get_table_row("dataset_versions", dataset_version_id))
+        frame = load_dataset_frame(dataset_version_id).copy()
+        if frame.empty:
+            raise ValueError("Selected dataset has no rows to visualize.")
+
+        frame["ticker"] = frame["ticker"].astype(str)
+        frame["effective_at"] = pd.to_datetime(frame["effective_at"], utc=True).dt.normalize()
+        frame = frame.sort_values(["ticker", "effective_at"]).reset_index(drop=True)
+        tickers = sorted(frame["ticker"].dropna().unique().tolist())
+        if not tickers:
+            raise ValueError("Selected dataset does not contain any tickers.")
+
+        selected_ticker = ticker if ticker in tickers else tickers[0]
+        ticker_frame = frame[frame["ticker"] == selected_ticker].copy()
+        prediction_payload = self._build_dataset_prediction_payload(
+            dataset_version_id=dataset_version_id,
+            ticker=selected_ticker,
+            feature_set_version_id=feature_set_version_id,
+            model_version_id=model_version_id,
+        )
+        news_events = self._build_dataset_news_payload(dataset_version_id=dataset_version_id, ticker=selected_ticker)
+        event_markers = self._build_dataset_event_markers(ticker_frame)
+
+        return {
+            "dataset_version_id": dataset_version_id,
+            "dataset_name": dataset["name"],
+            "ticker": selected_ticker,
+            "tickers": tickers,
+            "feature_set_version_id": prediction_payload["feature_set_version_id"],
+            "model_version_id": prediction_payload["model_version_id"],
+            "price_series": [
+                {
+                    "effective_at": str(row["effective_at"].isoformat()),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                    "macro_surprise": float(row["macro_surprise"]),
+                    "earnings_signal": float(row["earnings_signal"]),
+                    "sentiment_1d": float(row["sentiment_1d"]),
+                    "sentiment_5d": float(row["sentiment_5d"]),
+                }
+                for _, row in ticker_frame.iterrows()
+            ],
+            "prediction_series": prediction_payload["prediction_series"],
+            "layer_score_columns": prediction_payload["layer_score_columns"],
+            "news_events": news_events,
+            "event_markers": event_markers,
+            "assessment": dataset.get("summary", {}).get("assessment", {}),
+        }
+
     def list_research_layers(self) -> list[dict[str, Any]]:
         layers = self._list_table("research_layers", limit=200)
         order = {layer_id: index for index, layer_id in enumerate(RESEARCH_LAYER_ORDER)}
@@ -152,27 +213,7 @@ class ControlPlane:
         return self._list_table("testing_runs", limit=limit)
 
     def create_dataset_version(self, request: DatasetCreateRequest) -> dict[str, Any]:
-        dataset_id = self._new_id("dataset")
-        tags = self._normalize_tags(request.tags)
-        result = build_synthetic_dataset(
-            dataset_id=dataset_id,
-            name=request.name,
-            num_tickers=request.num_tickers,
-            num_days=request.num_days,
-            seed=request.seed,
-        )
-        record = {
-            "id": dataset_id,
-            "name": request.name,
-            "source_id": request.source_id,
-            "status": "completed",
-            "tags_json": json.dumps(tags),
-            "summary_json": json.dumps(result.summary),
-            "created_at": utcnow(),
-            "updated_at": utcnow(),
-        }
-        self._insert("dataset_versions", record)
-        return self._enrich_dataset_record(self._deserialize_record(record))
+        raise ValueError("Synthetic dataset creation is disabled. Import a real parquet dataset instead.")
 
     def import_dataset_version(self, request: DatasetImportRequest) -> dict[str, Any]:
         dataset_id = self._new_id("dataset")
@@ -253,6 +294,12 @@ class ControlPlane:
         return self._deserialize_record(record)
 
     def start_training_run(self, request: TrainingRunRequest) -> dict[str, Any]:
+        if not request.dataset_version_id and not request.feature_set_version_id:
+            raise ValueError("Training requires a real dataset or an existing feature set. Synthetic fallback is disabled.")
+        if request.feature_set_version_id and request.dataset_version_id:
+            feature_set = self._get_table_row("feature_set_versions", request.feature_set_version_id)
+            if str(feature_set["dataset_version_id"]) != str(request.dataset_version_id):
+                raise ValueError("Selected feature set does not belong to the selected dataset.")
         run_id = self._new_id("train")
         record = {
             "id": run_id,
@@ -424,15 +471,15 @@ class ControlPlane:
                 self._update_table("training_runs", run_id, {"config_json": json.dumps(config), "updated_at": utcnow()})
             self._log_event(run_id, "training", "phase0", "bootstrap", "status", "info", "Bootstrapping training pipeline.", 2.5, config)
             dataset_version_id = run["dataset_version_id"]
-            if not dataset_version_id:
-                self._wait_for_permission("training", run_id)
-                dataset = self.create_dataset_version(DatasetCreateRequest(name=f"{config['name']} Dataset", num_tickers=48, num_days=320, seed=11))
-                dataset_version_id = dataset["id"]
+            feature_set_version_id = run["feature_set_version_id"]
+            if not dataset_version_id and feature_set_version_id:
+                feature_set = self._get_table_row("feature_set_versions", feature_set_version_id)
+                dataset_version_id = feature_set["dataset_version_id"]
                 self._update_table("training_runs", run_id, {"dataset_version_id": dataset_version_id, "updated_at": utcnow()})
-                self._log_event(run_id, "training", "phase0", "data-foundation", "dataset_created", "info", "Synthetic PIT dataset built.", 14.0, dataset)
+            if not dataset_version_id:
+                raise ValueError("Training requires a real imported dataset. Synthetic fallback is disabled.")
 
             self._set_stage("training", run_id, phase="phase2", stage="feature-materialization", state="running")
-            feature_set_version_id = run["feature_set_version_id"]
             if not feature_set_version_id:
                 self._wait_for_permission("training", run_id)
                 feature_request = FeatureMaterializationRequest(
@@ -1072,6 +1119,151 @@ class ControlPlane:
             return json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return None
+
+    def _build_dataset_prediction_payload(
+        self,
+        dataset_version_id: str,
+        ticker: str,
+        feature_set_version_id: str | None,
+        model_version_id: str | None,
+    ) -> dict[str, Any]:
+        resolved_feature_set_id = feature_set_version_id
+        model_record: dict[str, Any] | None = None
+        if model_version_id:
+            model_record = self._get_table_row("model_versions", model_version_id)
+            resolved_feature_set_id = resolved_feature_set_id or str(model_record["feature_set_version_id"])
+
+        if not resolved_feature_set_id:
+            return {
+                "feature_set_version_id": None,
+                "model_version_id": model_version_id,
+                "prediction_series": [],
+                "layer_score_columns": [],
+            }
+
+        feature_set = self._get_table_row("feature_set_versions", resolved_feature_set_id)
+        if str(feature_set["dataset_version_id"]) != str(dataset_version_id):
+            raise ValueError("Selected feature set does not belong to the selected dataset.")
+        if model_record and str(model_record["feature_set_version_id"]) != str(resolved_feature_set_id):
+            raise ValueError("Selected model version does not belong to the selected feature set.")
+
+        feature_frame = load_feature_frame(resolved_feature_set_id).copy()
+        feature_frame["ticker"] = feature_frame["ticker"].astype(str)
+        feature_frame["effective_at"] = pd.to_datetime(feature_frame["effective_at"], utc=True).dt.normalize()
+        ticker_frame = feature_frame[feature_frame["ticker"] == ticker].copy()
+        if ticker_frame.empty:
+            return {
+                "feature_set_version_id": resolved_feature_set_id,
+                "model_version_id": model_version_id,
+                "prediction_series": [],
+                "layer_score_columns": [],
+            }
+
+        layer_score_columns: list[dict[str, str]] = []
+        if model_record:
+            predictor, layer_predictors, _ = load_predictor_bundle(model_record["artifact_uri"])
+            ticker_frame["predicted_return"] = predictor(ticker_frame)
+            for layer_id, layer_predictor in layer_predictors.items():
+                column_key = f"{layer_id}_score"
+                ticker_frame[column_key] = layer_predictor(ticker_frame)
+                layer_score_columns.append(
+                    {
+                        "key": column_key,
+                        "label": str(layer_id).replace("layer_", "").replace("_", " ").title(),
+                    }
+                )
+
+        ticker_frame = ticker_frame.sort_values("effective_at").reset_index(drop=True)
+        prediction_series: list[dict[str, object]] = []
+        for _, row in ticker_frame.iterrows():
+            payload: dict[str, object] = {
+                "effective_at": str(row["effective_at"].isoformat()),
+                "split": str(row["split"]),
+                "forward_return": float(row["forward_return"]),
+            }
+            if "predicted_return" in ticker_frame.columns and pd.notna(row.get("predicted_return")):
+                payload["predicted_return"] = float(row["predicted_return"])
+            for layer_column in layer_score_columns:
+                column_key = layer_column["key"]
+                if pd.notna(row.get(column_key)):
+                    payload[column_key] = float(row[column_key])
+            prediction_series.append(payload)
+
+        return {
+            "feature_set_version_id": resolved_feature_set_id,
+            "model_version_id": model_version_id,
+            "prediction_series": prediction_series,
+            "layer_score_columns": layer_score_columns,
+        }
+
+    def _build_dataset_news_payload(self, dataset_version_id: str, ticker: str) -> list[dict[str, object]]:
+        news_frame = load_news_event_frame(dataset_version_id).copy()
+        if news_frame.empty:
+            return []
+
+        news_frame["event_scope"] = news_frame["event_scope"].astype(str)
+        news_frame["ticker"] = news_frame.get("ticker", pd.Series(index=news_frame.index, dtype="object")).astype("string")
+        news_frame["known_at"] = pd.to_datetime(news_frame["known_at"], utc=True, errors="coerce")
+        news_frame = news_frame[
+            (news_frame["event_scope"] == "macro")
+            | ((news_frame["event_scope"] == "ticker") & news_frame["ticker"].fillna("").astype(str).eq(ticker))
+        ].copy()
+        news_frame = news_frame.dropna(subset=["known_at"]).sort_values("known_at").reset_index(drop=True)
+
+        return [
+            {
+                "event_id": str(row["event_id"]),
+                "known_at": str(row["known_at"].isoformat()),
+                "event_scope": str(row["event_scope"]),
+                "event_type": str(row["event_type"]),
+                "headline": str(row["headline"]),
+                "body": str(row["body"])[:220],
+                "source": str(row["source"]),
+                "source_weight": float(row["source_weight"]),
+                "novelty_score": float(row["novelty_score"]),
+            }
+            for _, row in news_frame.iterrows()
+        ]
+
+    def _build_dataset_event_markers(self, ticker_frame: pd.DataFrame) -> list[dict[str, object]]:
+        event_markers: list[dict[str, object]] = []
+        if ticker_frame.empty:
+            return event_markers
+
+        ticker_frame = ticker_frame.sort_values("effective_at").reset_index(drop=True)
+        sentiment_threshold = float(ticker_frame["sentiment_1d"].abs().quantile(0.8)) if len(ticker_frame) > 1 else 0.0
+
+        for _, row in ticker_frame.iterrows():
+            effective_at = str(pd.Timestamp(row["effective_at"]).isoformat())
+            if abs(float(row["earnings_signal"])) > 0:
+                event_markers.append(
+                    {
+                        "effective_at": effective_at,
+                        "category": "earnings",
+                        "label": f"Earnings signal {float(row['earnings_signal']):.4f}",
+                        "value": float(row["earnings_signal"]),
+                    }
+                )
+            if abs(float(row["macro_surprise"])) >= 0.05:
+                event_markers.append(
+                    {
+                        "effective_at": effective_at,
+                        "category": "macro_surprise",
+                        "label": f"Macro surprise {float(row['macro_surprise']):.4f}",
+                        "value": float(row["macro_surprise"]),
+                    }
+                )
+            if sentiment_threshold > 0 and abs(float(row["sentiment_1d"])) >= sentiment_threshold:
+                event_markers.append(
+                    {
+                        "effective_at": effective_at,
+                        "category": "sentiment_shock",
+                        "label": f"Sentiment shock {float(row['sentiment_1d']):.4f}",
+                        "value": float(row["sentiment_1d"]),
+                    }
+                )
+
+        return event_markers
 
     def _derive_dataset_auto_tags(self, dataset: dict[str, Any]) -> list[str]:
         summary = dataset.get("summary") if isinstance(dataset.get("summary"), dict) else {}
