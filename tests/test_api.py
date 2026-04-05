@@ -66,6 +66,15 @@ def _write_realistic_parquet(path: Path) -> None:
     pd.DataFrame(rows).to_parquet(path, index=False)
 
 
+def _write_parquet_with_gaps_and_duplicates(path: Path) -> None:
+    _write_realistic_parquet(path)
+    frame = pd.read_parquet(path)
+    missing_row_index = frame.index[(frame["ticker"] == "BBB") & (frame["effective_at"] == "2025-01-16T00:00:00")][0]
+    duplicate_row = frame.loc[(frame["ticker"] == "AAA") & (frame["effective_at"] == "2025-01-21T00:00:00")].iloc[[0]]
+    adjusted = pd.concat([frame.drop(index=missing_row_index), duplicate_row], ignore_index=True)
+    adjusted.to_parquet(path, index=False)
+
+
 def test_import_parquet_dataset_and_materialize_features(tmp_path: Path) -> None:
     parquet_path = tmp_path / "findf_snapshot.parquet"
     _write_realistic_parquet(parquet_path)
@@ -91,6 +100,10 @@ def test_import_parquet_dataset_and_materialize_features(tmp_path: Path) -> None
     assert {"production", "large cap"}.issubset(set(dataset["tags"]))
     assert dataset["summary"]["artifacts"]["source_path"] == str(parquet_path.resolve())
     assert dataset["summary"]["sample_tickers"] == ["AAA", "BBB", "CCC", "DDD"]
+    assert dataset["summary"]["assessment"]["data_level"] == "high"
+    assert dataset["summary"]["assessment"]["status"] == "healthy"
+    assert dataset["summary"]["assessment"]["gaps"]["missing_sessions"] == 0
+    assert dataset["summary"]["assessment"]["gaps"]["duplicate_key_rows"] == 0
 
     saved_tags = client.get("/api/dataset-tags")
     assert saved_tags.status_code == 200
@@ -118,11 +131,33 @@ def test_import_parquet_dataset_and_materialize_features(tmp_path: Path) -> None
     assert {"large cap", "macro", "ticker:DDD"}.issubset(set(persisted_dataset["tags"]))
 
 
+def test_import_parquet_dataset_surfaces_gaps_and_duplicates(tmp_path: Path) -> None:
+    parquet_path = tmp_path / "findf_snapshot_with_gaps.parquet"
+    _write_parquet_with_gaps_and_duplicates(parquet_path)
+
+    import_response = client.post(
+        "/api/datasets/import-parquet",
+        json={"path": str(parquet_path), "name": "findf import with gaps"},
+    )
+    assert import_response.status_code == 200
+    dataset = import_response.json()
+    assessment = dataset["summary"]["assessment"]
+
+    assert assessment["data_level"] == "medium"
+    assert assessment["status"] == "warning"
+    assert assessment["gaps"]["missing_sessions"] == 1
+    assert assessment["gaps"]["duplicate_key_rows"] == 1
+    assert assessment["gaps"]["instruments_with_gaps"] == 1
+    assert any(issue["title"] == "Missing trading sessions" for issue in assessment["issues"])
+    assert any(issue["title"] == "Duplicate entity-date keys" for issue in assessment["issues"])
+
+
 def test_end_to_end_training_and_testing_flow() -> None:
     dataset_response = client.post("/api/datasets", json={})
     assert dataset_response.status_code == 200
     dataset = dataset_response.json()
     assert {"synthetic", "ohlcv", "fundamental", "momentum", "sentiment", "macro", "event", "multi-ticker"}.issubset(set(dataset["tags"]))
+    assert dataset["summary"]["assessment"]["data_level"] == "high"
 
     feature_response = client.post("/api/features", json={"dataset_version_id": dataset["id"]})
     assert feature_response.status_code == 200

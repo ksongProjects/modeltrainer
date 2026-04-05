@@ -648,6 +648,129 @@ select {
   font-size: 0.72rem;
 }
 
+.assessment-shell {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.assessment-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(99, 210, 255, 0.06), rgba(255, 255, 255, 0.01));
+}
+
+.assessment-heading {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.assessment-heading strong {
+  color: white;
+  font-size: 0.9rem;
+}
+
+.assessment-heading span {
+  color: var(--muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.assessment-source {
+  padding: 0.68rem 0.75rem;
+  border: 1px dashed rgba(99, 210, 255, 0.25);
+  background: rgba(99, 210, 255, 0.04);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.assessment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+.assessment-section {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.78rem;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.assessment-issue-list,
+.assessment-column-list,
+.assessment-gap-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.assessment-issue {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.72rem;
+  border: 1px solid var(--border);
+  background: rgba(12, 17, 24, 0.78);
+}
+
+.assessment-issue.severity-critical {
+  border-color: rgba(255, 107, 107, 0.28);
+  background: rgba(255, 107, 107, 0.05);
+}
+
+.assessment-issue.severity-warning {
+  border-color: rgba(99, 210, 255, 0.24);
+  background: rgba(99, 210, 255, 0.045);
+}
+
+.assessment-issue-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.assessment-issue-header strong,
+.assessment-column-row strong,
+.assessment-gap-row strong {
+  color: white;
+}
+
+.assessment-issue p,
+.assessment-issue small {
+  margin: 0;
+  color: #d9e2ef;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.assessment-column-row,
+.assessment-gap-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px solid rgba(237, 243, 251, 0.08);
+  background: rgba(12, 17, 24, 0.72);
+}
+
+.assessment-column-row > div,
+.assessment-gap-row > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.assessment-column-row span,
+.assessment-gap-row span {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
 .wide-input {
   flex: 1 1 360px;
 }
