@@ -17,6 +17,33 @@ const tabs = [
   "Monitoring"
 ];
 
+const PANEL_COLLAPSE_STORAGE_KEY = "quant-platform-panel-collapse:workspace";
+
+function loadCollapsedPanelMap(storageKey: string): Record<string, boolean> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    if (!stored) {
+      return {};
+    }
+
+    const parsed = JSON.parse(stored);
+    return parsed && typeof parsed === "object"
+      ? Object.entries(parsed as Record<string, unknown>).reduce<Record<string, boolean>>((nextPanels, [panelId, value]) => {
+          if (Boolean(value)) {
+            nextPanels[panelId] = true;
+          }
+          return nextPanels;
+        }, {})
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 function MetricCard({ label, value }: { label: string; value: string | number | null | undefined }) {
   return (
     <div className="metric-card">
@@ -40,6 +67,18 @@ function StatusPill({ value }: { value: string }) {
 function RequirementPill({ value }: { value: string }) {
   const tone = value === "required" ? "bad" : value === "conditional" ? "info" : "muted";
   return <span className={`status-pill tone-${tone}`}>{value}</span>;
+}
+
+function AssessmentPill({ value }: { value: string | null | undefined }) {
+  const normalized = String(value ?? "unknown").toLowerCase();
+  const tone = ["high", "healthy"].includes(normalized)
+    ? "good"
+    : ["medium", "warning"].includes(normalized)
+      ? "info"
+      : ["low", "critical"].includes(normalized)
+        ? "bad"
+        : "muted";
+  return <span className={`status-pill tone-${tone}`}>{normalized}</span>;
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {
@@ -319,6 +358,15 @@ function pretty(value: unknown): string {
   return String(value);
 }
 
+function formatPercent(value: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "n/a";
+  }
+  const rounded = Math.abs(numeric - Math.round(numeric)) < 0.005 ? String(Math.round(numeric)) : numeric.toFixed(2);
+  return `${rounded}%`;
+}
+
 function shortId(value: unknown): string {
   if (typeof value !== "string" || value.length <= 18) {
     return pretty(value);
@@ -387,6 +435,7 @@ export default function App() {
   const [selectedImportTags, setSelectedImportTags] = useState<string[]>([]);
   const [savedDatasetTags, setSavedDatasetTags] = useState<JsonRecord[]>([]);
   const [newSavedTagName, setNewSavedTagName] = useState("");
+  const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [featureDatasetId, setFeatureDatasetId] = useState("");
   const [selectedLayerId, setSelectedLayerId] = useState("");
   const [trainingForm, setTrainingForm] = useState({
@@ -425,6 +474,50 @@ export default function App() {
   const [runtimeSelfCheckResult, setRuntimeSelfCheckResult] = useState<JsonRecord | null>(null);
   const [runtimeSelfCheckRunning, setRuntimeSelfCheckRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [collapsedPanels, setCollapsedPanels] = useState<Record<string, boolean>>(() => loadCollapsedPanelMap(PANEL_COLLAPSE_STORAGE_KEY));
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(PANEL_COLLAPSE_STORAGE_KEY, JSON.stringify(collapsedPanels));
+  }, [collapsedPanels]);
+
+  function isPanelCollapsed(panelId: string): boolean {
+    return Boolean(collapsedPanels[panelId]);
+  }
+
+  function togglePanelCollapse(panelId: string) {
+    setCollapsedPanels((currentPanels) => ({
+      ...currentPanels,
+      [panelId]: !currentPanels[panelId]
+    }));
+  }
+
+  function renderPanelCollapseButton(panelId: string, label: string) {
+    const collapsed = isPanelCollapsed(panelId);
+
+    return (
+      <button
+        type="button"
+        className={`panel-collapse-button ${collapsed ? "is-collapsed" : ""}`}
+        onClick={() => togglePanelCollapse(panelId)}
+        aria-expanded={!collapsed}
+        aria-label={`${collapsed ? "Expand" : "Collapse"} ${label}`}
+        title={`${collapsed ? "Expand" : "Collapse"} ${label}`}
+      >
+        <span className="panel-collapse-glyph" aria-hidden="true">
+          {collapsed ? "+" : "-"}
+        </span>
+        {collapsed ? "Expand" : "Collapse"}
+      </button>
+    );
+  }
+
+  function renderCollapsedPanelNote(message: string) {
+    return <div className="panel-collapsed-note">{message}</div>;
+  }
 
   async function refresh() {
     try {
@@ -498,6 +591,10 @@ export default function App() {
   const modelSpecs = useMemo(() => ((catalog?.model_specs ?? []) as JsonRecord[]), [catalog]);
   const researchLayers = useMemo(() => ((catalog?.research_layers ?? []) as JsonRecord[]), [catalog]);
   const importTags = useMemo(() => normalizeTagList([...selectedImportTags, ...splitTagInput(importTagText)]), [importTagText, selectedImportTags]);
+
+  useEffect(() => {
+    setSelectedDatasetId((current) => (current && datasets.some((dataset) => dataset.id === current) ? current : String(datasets[0]?.id ?? "")));
+  }, [datasets]);
 
   useEffect(() => {
     setFeatureDatasetId((current) => (current && datasets.some((dataset) => dataset.id === current) ? current : String(datasets[0]?.id ?? "")));
@@ -738,6 +835,40 @@ export default function App() {
   }
 
   const latestDataset = datasets[0] ?? null;
+  const latestDatasetAssessment = latestDataset && typeof latestDataset.summary?.assessment === "object"
+    ? (latestDataset.summary.assessment as JsonRecord)
+    : null;
+  const selectedDataset = useMemo(
+    () => datasets.find((dataset) => String(dataset.id) === selectedDatasetId) ?? latestDataset,
+    [datasets, latestDataset, selectedDatasetId]
+  );
+  const selectedDatasetAssessment = selectedDataset && typeof selectedDataset.summary?.assessment === "object"
+    ? (selectedDataset.summary.assessment as JsonRecord)
+    : null;
+  const selectedDatasetIssues = useMemo(
+    () => (Array.isArray(selectedDatasetAssessment?.issues) ? (selectedDatasetAssessment.issues as JsonRecord[]) : []),
+    [selectedDatasetAssessment]
+  );
+  const selectedDatasetGapSamples = useMemo(
+    () => (Array.isArray(selectedDatasetAssessment?.gaps?.gap_samples) ? (selectedDatasetAssessment.gaps.gap_samples as JsonRecord[]) : []),
+    [selectedDatasetAssessment]
+  );
+  const selectedDatasetColumnCoverage = useMemo(() => {
+    if (!selectedDatasetAssessment || typeof selectedDatasetAssessment.column_completeness !== "object" || !selectedDatasetAssessment.column_completeness) {
+      return [] as Array<{ name: string; detail: JsonRecord }>;
+    }
+
+    return Object.entries(selectedDatasetAssessment.column_completeness as Record<string, JsonRecord>)
+      .map(([name, detail]) => ({ name, detail }))
+      .sort((left, right) => {
+        const leftPct = Number(left.detail?.non_null_pct ?? 0);
+        const rightPct = Number(right.detail?.non_null_pct ?? 0);
+        if (leftPct !== rightPct) {
+          return leftPct - rightPct;
+        }
+        return left.name.localeCompare(right.name);
+      });
+  }, [selectedDatasetAssessment]);
   const latestFeatureSet = features[0] ?? null;
   const latestModel = models[0] ?? null;
   const activeTrainingCount = trainingRuns.filter((run) => ["queued", "running", "paused"].includes(String(run.state))).length;
@@ -770,7 +901,30 @@ export default function App() {
       render: (dataset) => <TagList tags={normalizeTagList(Array.isArray(dataset.tags) ? dataset.tags : [])} />
     },
     { key: "id", label: "ID", className: "mono-cell", sortable: true, sortValue: (dataset) => String(dataset.id ?? ""), render: (dataset) => shortId(dataset.id) },
+    {
+      key: "data_level",
+      label: "Data Level",
+      sortable: true,
+      sortValue: (dataset) => Number(dataset.summary?.assessment?.score_pct ?? -1),
+      render: (dataset) => <AssessmentPill value={String(dataset.summary?.assessment?.data_level ?? dataset.summary?.assessment?.status ?? "unknown")} />
+    },
     { key: "rows", label: "Rows", className: "mono-cell", sortable: true, sortValue: (dataset) => Number(dataset.summary?.rows ?? 0), render: (dataset) => pretty(dataset.summary?.rows) },
+    {
+      key: "completeness",
+      label: "Complete",
+      className: "mono-cell",
+      sortable: true,
+      sortValue: (dataset) => Number(dataset.summary?.assessment?.completeness_pct ?? 0),
+      render: (dataset) => formatPercent(dataset.summary?.assessment?.completeness_pct)
+    },
+    {
+      key: "gap_sessions",
+      label: "Gap Sess",
+      className: "mono-cell",
+      sortable: true,
+      sortValue: (dataset) => Number(dataset.summary?.assessment?.gaps?.missing_sessions ?? 0),
+      render: (dataset) => pretty(dataset.summary?.assessment?.gaps?.missing_sessions ?? 0)
+    },
     { key: "source", label: "Source", className: "mono-cell", sortable: true, sortValue: (dataset) => String(dataset.source_id ?? ""), render: (dataset) => pretty(dataset.source_id) },
     {
       key: "path",
@@ -1228,20 +1382,21 @@ export default function App() {
           </DashboardLayout>
         );
       }
-      case "Data Pipeline":
-        return (
-          <DashboardLayout
-            layoutKey="data-pipeline"
-            defaultRows={[
-              ["datasets", "feature-store"],
-              ["manage-tags"]
-            ]}
-            panels={[
-              { id: "datasets", label: "Datasets" },
-              { id: "feature-store", label: "Feature Store" },
-              { id: "manage-tags", label: "Manage Tags" }
-            ]}
-          >
+        case "Data Pipeline":
+          return (
+            <DashboardLayout
+              layoutKey="data-pipeline"
+              defaultRows={[
+                ["datasets", "dataset-inspection"],
+                ["feature-store", "manage-tags"]
+              ]}
+              panels={[
+                { id: "datasets", label: "Datasets" },
+                { id: "dataset-inspection", label: "Dataset Inspection" },
+                { id: "feature-store", label: "Feature Store" },
+                { id: "manage-tags", label: "Manage Tags" }
+              ]}
+            >
             <section className="panel">
               <div className="panel-header">
                 <div>
@@ -1321,20 +1476,119 @@ export default function App() {
                   plus macro/economic news embedding features.
                 </small>
               </div>
-              <DenseTable
-                columns={datasetColumns}
-                rows={datasets}
-                rowKey={(dataset) => String(dataset.id)}
-                emptyTitle="No datasets yet"
-                emptyBody="Build a synthetic PIT snapshot or import a `findf` parquet export to start the pipeline."
-                filterPlaceholder="Filter datasets by name, id, path, or tag"
-                defaultSort={{ key: "rows", direction: "desc" }}
-              />
-            </section>
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <span className="panel-kicker">Phase 0-2</span>
+                <DenseTable
+                  columns={datasetColumns}
+                  rows={datasets}
+                  rowKey={(dataset) => String(dataset.id)}
+                  onRowClick={(dataset) => setSelectedDatasetId(String(dataset.id))}
+                  selectedRowId={selectedDataset ? String(selectedDataset.id) : null}
+                  emptyTitle="No datasets yet"
+                  emptyBody="Build a synthetic PIT snapshot or import a `findf` parquet export to start the pipeline."
+                  filterPlaceholder="Filter datasets by name, id, path, or tag"
+                  defaultSort={{ key: "rows", direction: "desc" }}
+                />
+              </section>
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">Inspection Layer</span>
+                    <h2>Dataset Assessment</h2>
+                  </div>
+                  {selectedDatasetAssessment ? <AssessmentPill value={String(selectedDatasetAssessment.data_level ?? selectedDatasetAssessment.status)} /> : null}
+                </div>
+                <p className="panel-copy">
+                  Examine completeness, continuity, and structural PIT quality before this snapshot moves into feature generation or training.
+                </p>
+                {selectedDataset ? (
+                  <div className="assessment-shell">
+                    <div className="assessment-header">
+                      <div className="assessment-heading">
+                        <strong>{selectedDataset.name}</strong>
+                        <span>{shortId(selectedDataset.id)}</span>
+                      </div>
+                      {selectedDatasetAssessment ? <StatusPill value={String(selectedDatasetAssessment.status ?? "unknown")} /> : null}
+                    </div>
+                    <div className="assessment-source mono-cell">
+                      {selectedDataset.summary?.artifacts?.source_path ?? selectedDataset.summary?.artifacts?.raw_path ?? "generated locally"}
+                    </div>
+                    <div className="metric-grid compact">
+                      <MetricCard label="Score" value={formatPercent(selectedDatasetAssessment?.score_pct)} />
+                      <MetricCard label="Completeness" value={formatPercent(selectedDatasetAssessment?.completeness_pct)} />
+                      <MetricCard label="Continuity" value={formatPercent(selectedDatasetAssessment?.continuity_pct)} />
+                      <MetricCard label="Quality" value={formatPercent(selectedDatasetAssessment?.quality_pct)} />
+                      <MetricCard label="Missing Sessions" value={pretty(selectedDatasetAssessment?.gaps?.missing_sessions ?? 0)} />
+                      <MetricCard label="Duplicate Keys" value={pretty(selectedDatasetAssessment?.gaps?.duplicate_key_rows ?? 0)} />
+                      <MetricCard label="PIT Violations" value={pretty(selectedDatasetAssessment?.quality_checks?.timestamp_order_violations ?? 0)} />
+                      <MetricCard label="OHLC Issues" value={pretty(selectedDatasetAssessment?.quality_checks?.ohlc_violations ?? 0)} />
+                    </div>
+                    <div className="assessment-grid">
+                      <div className="assessment-section">
+                        <span className="panel-kicker">Findings</span>
+                        {selectedDatasetIssues.length ? (
+                          <div className="assessment-issue-list">
+                            {selectedDatasetIssues.map((issue, index) => (
+                              <article key={`${issue.title ?? "issue"}-${index}`} className={`assessment-issue severity-${String(issue.severity ?? "warning")}`}>
+                                <div className="assessment-issue-header">
+                                  <strong>{String(issue.title ?? "Assessment finding")}</strong>
+                                  <AssessmentPill value={String(issue.severity ?? "warning")} />
+                                </div>
+                                <p>{String(issue.detail ?? "")}</p>
+                                <small>{String(issue.recommendation ?? "")}</small>
+                              </article>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="inline-note">
+                            No structural gaps or PIT integrity issues were detected in the selected snapshot.
+                          </div>
+                        )}
+                      </div>
+                      <div className="assessment-section">
+                        <span className="panel-kicker">Column Coverage</span>
+                        <div className="assessment-column-list">
+                          {selectedDatasetColumnCoverage.map(({ name, detail }) => (
+                            <div key={name} className="assessment-column-row">
+                              <div>
+                                <strong>{name}</strong>
+                                <span>{detail?.required ? "required" : "optional"}</span>
+                              </div>
+                              <div className="mono-cell">
+                                <strong>{formatPercent(detail?.non_null_pct)}</strong>
+                                <span>{pretty(detail?.missing_values ?? 0)} missing</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    {selectedDatasetGapSamples.length ? (
+                      <div className="assessment-section">
+                        <span className="panel-kicker">Gap Samples</span>
+                        <div className="assessment-gap-list">
+                          {selectedDatasetGapSamples.map((sample, index) => (
+                            <div key={`${sample.instrument ?? "gap"}-${index}`} className="assessment-gap-row">
+                              <div>
+                                <strong>{String(sample.instrument ?? "Unknown instrument")}</strong>
+                                <span>{pretty(sample.missing_sessions ?? 0)} missing sessions</span>
+                              </div>
+                              <div className="mono-cell">{Array.isArray(sample.sample_dates) ? sample.sample_dates.join(", ") : "n/a"}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <EmptyState
+                    title="No dataset selected"
+                    body="Import or build a dataset first, then click it to inspect completeness, gap coverage, and quality checks."
+                  />
+                )}
+              </section>
+              <section className="panel">
+                <div className="panel-header">
+                  <div>
+                    <span className="panel-kicker">Phase 0-2</span>
                   <h2>Feature Store</h2>
                 </div>
                 <button onClick={createFeatureSet} disabled={!datasets.length}>
@@ -1731,15 +1985,20 @@ export default function App() {
                 <span className="panel-kicker">Stress Surface</span>
                 <h2>Risk Metrics</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("main-risk-metrics", "Risk Metrics")}</div>
             </div>
-            <DenseTable
-              columns={metricColumns}
-              rows={runMetrics.filter((metric) => metric.group_name === "risk")}
-              rowKey={(metric) => String(metric.id)}
-              emptyTitle="No risk metrics"
-              emptyBody="Run a testing session to populate risk and stress metrics."
-              defaultSort={{ key: "value", direction: "desc" }}
-            />
+            {isPanelCollapsed("main-risk-metrics")
+              ? renderCollapsedPanelNote("Risk metrics are tucked away for now. Expand this section to inspect the latest surface.")
+              : (
+                  <DenseTable
+                    columns={metricColumns}
+                    rows={runMetrics.filter((metric) => metric.group_name === "risk")}
+                    rowKey={(metric) => String(metric.id)}
+                    emptyTitle="No risk metrics"
+                    emptyBody="Run a testing session to populate risk and stress metrics."
+                    defaultSort={{ key: "value", direction: "desc" }}
+                  />
+                )}
           </section>
         );
       case "Portfolio/Backtest":
@@ -1750,15 +2009,20 @@ export default function App() {
                 <span className="panel-kicker">Allocator</span>
                 <h2>Portfolio Metrics</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("main-portfolio-metrics", "Portfolio Metrics")}</div>
             </div>
-            <DenseTable
-              columns={metricColumns}
-              rows={runMetrics.filter((metric) => metric.group_name === "testing")}
-              rowKey={(metric) => String(metric.id)}
-              emptyTitle="No portfolio metrics"
-              emptyBody="Backtest metrics will appear here after a testing session runs."
-              defaultSort={{ key: "value", direction: "desc" }}
-            />
+            {isPanelCollapsed("main-portfolio-metrics")
+              ? renderCollapsedPanelNote("Portfolio metrics are hidden until you need them. Expand to review the current backtest readout.")
+              : (
+                  <DenseTable
+                    columns={metricColumns}
+                    rows={runMetrics.filter((metric) => metric.group_name === "testing")}
+                    rowKey={(metric) => String(metric.id)}
+                    emptyTitle="No portfolio metrics"
+                    emptyBody="Backtest metrics will appear here after a testing session runs."
+                    defaultSort={{ key: "value", direction: "desc" }}
+                  />
+                )}
           </section>
         );
       case "Execution Simulator":
@@ -1769,15 +2033,20 @@ export default function App() {
                 <span className="panel-kicker">Paper Execution</span>
                 <h2>Execution Metrics</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("main-execution-metrics", "Execution Metrics")}</div>
             </div>
-            <DenseTable
-              columns={metricColumns}
-              rows={runMetrics.filter((metric) => metric.group_name === "execution")}
-              rowKey={(metric) => String(metric.id)}
-              emptyTitle="No execution metrics"
-              emptyBody="Paper execution metrics will populate here after testing."
-              defaultSort={{ key: "value", direction: "desc" }}
-            />
+            {isPanelCollapsed("main-execution-metrics")
+              ? renderCollapsedPanelNote("Execution metrics are collapsed. Expand to inspect the latest paper-execution output.")
+              : (
+                  <DenseTable
+                    columns={metricColumns}
+                    rows={runMetrics.filter((metric) => metric.group_name === "execution")}
+                    rowKey={(metric) => String(metric.id)}
+                    emptyTitle="No execution metrics"
+                    emptyBody="Paper execution metrics will populate here after testing."
+                    defaultSort={{ key: "value", direction: "desc" }}
+                  />
+                )}
           </section>
         );
       case "Model Registry":
@@ -1788,20 +2057,27 @@ export default function App() {
                 <span className="panel-kicker">Governance</span>
                 <h2>Model Registry</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("main-model-registry", "Model Registry")}</div>
             </div>
-            <p className="panel-copy">
-              Promote or reject trained models after reviewing checkpoints, out-of-sample metrics, and factual
-              calculation traces.
-            </p>
-            <DenseTable
-              columns={modelRegistryColumns}
-              rows={models}
-              rowKey={(model) => String(model.id)}
-              emptyTitle="Registry is empty"
-              emptyBody="Training a model creates a version here, where it can be promoted or rejected."
-              filterPlaceholder="Filter registry by name, id, or status"
-              defaultSort={{ key: "sharpe", direction: "desc" }}
-            />
+            {isPanelCollapsed("main-model-registry")
+              ? renderCollapsedPanelNote("The model registry is collapsed. Expand it to review promotion and rejection decisions.")
+              : (
+                  <>
+                    <p className="panel-copy">
+                      Promote or reject trained models after reviewing checkpoints, out-of-sample metrics, and factual
+                      calculation traces.
+                    </p>
+                    <DenseTable
+                      columns={modelRegistryColumns}
+                      rows={models}
+                      rowKey={(model) => String(model.id)}
+                      emptyTitle="Registry is empty"
+                      emptyBody="Training a model creates a version here, where it can be promoted or rejected."
+                      filterPlaceholder="Filter registry by name, id, or status"
+                      defaultSort={{ key: "sharpe", direction: "desc" }}
+                    />
+                  </>
+                )}
           </section>
         );
       case "Monitoring":
@@ -1976,12 +2252,16 @@ export default function App() {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="command-strip">
-        <article className="command-card">
-          <small>Dataset track</small>
-          <strong>{latestDataset?.name ?? "No PIT snapshot"}</strong>
-          <span>{latestDataset ? `${pretty(latestDataset.summary?.rows)} rows loaded` : "Import or build a dataset"}</span>
-        </article>
+        <section className="command-strip">
+          <article className="command-card">
+            <small>Dataset track</small>
+            <strong>{latestDataset?.name ?? "No PIT snapshot"}</strong>
+            <span>
+              {latestDataset
+                ? `${pretty(latestDataset.summary?.rows)} rows loaded / ${String(latestDatasetAssessment?.data_level ?? "n/a")} data level`
+                : "Import or build a dataset"}
+            </span>
+          </article>
         <article className="command-card">
           <small>Feature state</small>
           <strong>{latestFeatureSet?.name ?? "Feature store idle"}</strong>
@@ -2016,40 +2296,49 @@ export default function App() {
                 <span className="panel-kicker">Operations</span>
                 <h2>Run Control</h2>
               </div>
-              {selectedRunData?.state ? <StatusPill value={String(selectedRunData.state)} /> : null}
-            </div>
-            <div className="run-summary">
-              <span>{selectedRun?.kind ?? "No run selected"}</span>
-              <strong>{selectedRun ? shortId(selectedRun.id) : "Select a run"}</strong>
-              <span>{selectedRunData?.current_stage ?? "n/a"}</span>
-              <span>{selectedRunData?.updated_at ? formatTimestamp(selectedRunData.updated_at) : "Waiting for updates"}</span>
-            </div>
-            <div className="progress-block">
-              <div className="progress-meta">
-                <span>Progress</span>
-                <strong>{selectedProgress !== null ? `${selectedProgress.toFixed(0)}%` : "n/a"}</strong>
-              </div>
-              <div className="progress-track">
-                <div className="progress-bar" style={{ width: `${selectedProgress ?? 0}%` }} />
+              <div className="panel-header-actions">
+                {selectedRunData?.state ? <StatusPill value={String(selectedRunData.state)} /> : null}
+                {renderPanelCollapseButton("side-run-control", "Run Control")}
               </div>
             </div>
-            <div className="inline-controls">
-              <button onClick={() => controlRun("pause")} disabled={!selectedRun}>
-                Pause
-              </button>
-              <button onClick={() => controlRun("resume")} disabled={!selectedRun}>
-                Resume
-              </button>
-              <button className="ghost" onClick={() => controlRun("stop")} disabled={!selectedRun}>
-                Stop
-              </button>
-            </div>
-            <div className="inline-controls">
-              <input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} />
-              <button onClick={applyOverride} disabled={selectedRun?.kind !== "training"}>
-                Queue LR Override
-              </button>
-            </div>
+            {isPanelCollapsed("side-run-control")
+              ? renderCollapsedPanelNote("Run control is collapsed. Expand it to manage pause, resume, stop, and override actions.")
+              : (
+                  <>
+                    <div className="run-summary">
+                      <span>{selectedRun?.kind ?? "No run selected"}</span>
+                      <strong>{selectedRun ? shortId(selectedRun.id) : "Select a run"}</strong>
+                      <span>{selectedRunData?.current_stage ?? "n/a"}</span>
+                      <span>{selectedRunData?.updated_at ? formatTimestamp(selectedRunData.updated_at) : "Waiting for updates"}</span>
+                    </div>
+                    <div className="progress-block">
+                      <div className="progress-meta">
+                        <span>Progress</span>
+                        <strong>{selectedProgress !== null ? `${selectedProgress.toFixed(0)}%` : "n/a"}</strong>
+                      </div>
+                      <div className="progress-track">
+                        <div className="progress-bar" style={{ width: `${selectedProgress ?? 0}%` }} />
+                      </div>
+                    </div>
+                    <div className="inline-controls">
+                      <button onClick={() => controlRun("pause")} disabled={!selectedRun}>
+                        Pause
+                      </button>
+                      <button onClick={() => controlRun("resume")} disabled={!selectedRun}>
+                        Resume
+                      </button>
+                      <button className="ghost" onClick={() => controlRun("stop")} disabled={!selectedRun}>
+                        Stop
+                      </button>
+                    </div>
+                    <div className="inline-controls">
+                      <input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} />
+                      <button onClick={applyOverride} disabled={selectedRun?.kind !== "training"}>
+                        Queue LR Override
+                      </button>
+                    </div>
+                  </>
+                )}
           </section>
 
           <section className="panel">
@@ -2058,15 +2347,20 @@ export default function App() {
                 <span className="panel-kicker">Signal Readout</span>
                 <h2>Selected Metrics</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("side-selected-metrics", "Selected Metrics")}</div>
             </div>
-            <DenseTable
-              columns={metricColumns}
-              rows={primaryMetrics}
-              rowKey={(metric) => String(metric.id)}
-              emptyTitle="No metrics loaded"
-              emptyBody="Select a run to load training, risk, testing, and execution metrics into the sidebar."
-              defaultSort={{ key: "value", direction: "desc" }}
-            />
+            {isPanelCollapsed("side-selected-metrics")
+              ? renderCollapsedPanelNote("Selected metrics are hidden. Expand the section to compare the current signal readout.")
+              : (
+                  <DenseTable
+                    columns={metricColumns}
+                    rows={primaryMetrics}
+                    rowKey={(metric) => String(metric.id)}
+                    emptyTitle="No metrics loaded"
+                    emptyBody="Select a run to load training, risk, testing, and execution metrics into the sidebar."
+                    defaultSort={{ key: "value", direction: "desc" }}
+                  />
+                )}
           </section>
 
           <section className="panel">
@@ -2075,15 +2369,20 @@ export default function App() {
                 <span className="panel-kicker">Timeline</span>
                 <h2>Live Events</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("side-live-events", "Live Events")}</div>
             </div>
-            <DenseTable
-              columns={eventColumns}
-              rows={recentEvents}
-              rowKey={(event) => String(event.id)}
-              emptyTitle="No event stream yet"
-              emptyBody="Run events will appear here as soon as a training or testing flow starts emitting progress."
-              defaultSort={{ key: "time", direction: "desc" }}
-            />
+            {isPanelCollapsed("side-live-events")
+              ? renderCollapsedPanelNote("Live events are collapsed. Expand to watch the stream as runs report new activity.")
+              : (
+                  <DenseTable
+                    columns={eventColumns}
+                    rows={recentEvents}
+                    rowKey={(event) => String(event.id)}
+                    emptyTitle="No event stream yet"
+                    emptyBody="Run events will appear here as soon as a training or testing flow starts emitting progress."
+                    defaultSort={{ key: "time", direction: "desc" }}
+                  />
+                )}
           </section>
 
           <section className="panel">
@@ -2092,15 +2391,20 @@ export default function App() {
                 <span className="panel-kicker">Audit Trail</span>
                 <h2>Calculations</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("side-calculations", "Calculations")}</div>
             </div>
-            <DenseTable
-              columns={traceColumns}
-              rows={recentTraces}
-              rowKey={(trace) => String(trace.id)}
-              emptyTitle="No calculations loaded"
-              emptyBody="Calculation traces will show the latest formulas and outputs for the selected run."
-              defaultSort={{ key: "label", direction: "asc" }}
-            />
+            {isPanelCollapsed("side-calculations")
+              ? renderCollapsedPanelNote("Calculation traces are tucked away. Expand this panel to audit the latest formulas and outputs.")
+              : (
+                  <DenseTable
+                    columns={traceColumns}
+                    rows={recentTraces}
+                    rowKey={(trace) => String(trace.id)}
+                    emptyTitle="No calculations loaded"
+                    emptyBody="Calculation traces will show the latest formulas and outputs for the selected run."
+                    defaultSort={{ key: "label", direction: "asc" }}
+                  />
+                )}
           </section>
 
           <section className="panel">
@@ -2109,15 +2413,20 @@ export default function App() {
                 <span className="panel-kicker">Outputs</span>
                 <h2>Artifacts</h2>
               </div>
+              <div className="panel-header-actions">{renderPanelCollapseButton("side-artifacts", "Artifacts")}</div>
             </div>
-            <DenseTable
-              columns={artifactColumns}
-              rows={runArtifacts}
-              rowKey={(artifact) => String(artifact.id)}
-              emptyTitle="No artifacts yet"
-              emptyBody="Checkpoints, reports, and exported summaries for the selected run will land here."
-              defaultSort={{ key: "type", direction: "asc" }}
-            />
+            {isPanelCollapsed("side-artifacts")
+              ? renderCollapsedPanelNote("Artifacts are collapsed. Expand this section to review checkpoints, reports, and exports.")
+              : (
+                  <DenseTable
+                    columns={artifactColumns}
+                    rows={runArtifacts}
+                    rowKey={(artifact) => String(artifact.id)}
+                    emptyTitle="No artifacts yet"
+                    emptyBody="Checkpoints, reports, and exported summaries for the selected run will land here."
+                    defaultSort={{ key: "type", direction: "asc" }}
+                  />
+                )}
           </section>
         </aside>
       </main>

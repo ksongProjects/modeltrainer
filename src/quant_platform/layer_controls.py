@@ -134,6 +134,7 @@ def research_layer_process_steps(layer_id: str) -> list[dict[str, Any]]:
         LAYER_DATA_FOUNDATION: [
             _step("schema_validation", "Schema Validation", "required_columns subset observed_columns", "Validate parquet inputs against the PIT schema before ingest.", "required", False, ["raw source bundle"], ["validated PIT dataset"], "Required to prevent malformed datasets from entering research."),
             _step("pit_timestamp_alignment", "PIT Timestamp Alignment", "known_at <= ingested_at and effective_at aligned", "Preserve effective, known, and ingested timestamps per row.", "required", False, ["effective_at", "known_at", "ingested_at"], ["point-in-time lineage"], "Required to avoid look-ahead leakage."),
+            _step("dataset_quality_assessment", "Dataset Quality Assessment", "assessment = f(completeness, continuity, PIT quality)", "Score completeness, detect missing sessions and duplicate keys, and flag structural OHLC/PIT issues before feature work begins.", "required", False, ["validated PIT dataset"], ["assessment.level", "assessment.issues"], "Required so downstream layers can see data health before feature generation or training."),
             _step("source_lineage_manifest", "Lineage Manifest", "manifest = f(source_version, schema, row_count)", "Emit a source manifest with origin, coverage, and schema footprint.", "required", False, ["source_version", "schema", "row_count"], ["source_manifest.json"], "Required for reproducibility."),
         ],
         LAYER_FEATURE_STORE: [

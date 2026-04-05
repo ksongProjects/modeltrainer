@@ -430,7 +430,7 @@ select {
 .panel-layout-row {
   display: grid;
   gap: 0.75rem;
-  align-items: start;
+  align-items: stretch;
 }
 
 .panel-layout-row.is-split {
@@ -442,9 +442,14 @@ select {
   display: grid;
   gap: 0.35rem;
   align-content: start;
+  align-self: stretch;
 }
 
 .panel-layout-cell > .panel {
+  min-width: 0;
+}
+
+.panel-layout-body {
   min-width: 0;
 }
 
@@ -480,12 +485,16 @@ select {
 
 .panel-layout-separator {
   position: relative;
-  width: 14px;
-  min-width: 14px;
+  width: 10px;
+  min-width: 10px;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: col-resize;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transform: none;
 }
 
@@ -499,8 +508,8 @@ select {
 .panel-layout-separator::before {
   content: "";
   position: absolute;
-  top: 0.5rem;
-  bottom: 0.5rem;
+  top: 0.6rem;
+  bottom: 0.6rem;
   left: 50%;
   width: 1px;
   transform: translateX(-50%);
@@ -508,18 +517,15 @@ select {
 }
 
 .panel-layout-separator span {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 52px;
-  transform: translate(-50%, -50%);
+  position: relative;
+  width: 6px;
+  height: 34px;
   border: 1px solid rgba(99, 210, 255, 0.24);
   background:
     repeating-linear-gradient(
       180deg,
-      rgba(237, 243, 251, 0.2) 0 4px,
-      transparent 4px 8px
+      rgba(237, 243, 251, 0.2) 0 3px,
+      transparent 3px 6px
     ),
     rgba(12, 17, 24, 0.96);
   box-shadow: 0 0 18px rgba(99, 210, 255, 0.12);
@@ -539,6 +545,52 @@ select {
   margin-bottom: 0.75rem;
   padding-bottom: 0.55rem;
   border-bottom: 1px solid var(--border);
+}
+
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  margin-left: auto;
+}
+
+.panel-collapse-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.26rem 0.42rem;
+  border-color: rgba(99, 210, 255, 0.24);
+  background: rgba(10, 14, 21, 0.68);
+  color: var(--muted);
+  font-size: 0.54rem;
+}
+
+.panel-collapse-button:hover,
+.panel-collapse-button:focus-visible {
+  transform: none;
+}
+
+.panel-collapse-button.is-collapsed {
+  color: var(--accent);
+}
+
+.panel-collapse-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.7rem;
+  color: var(--accent);
+}
+
+.panel-collapsed-note,
+.panel-layout-collapsed-state {
+  padding: 0.65rem 0.72rem;
+  border: 1px dashed rgba(99, 210, 255, 0.22);
+  background: rgba(99, 210, 255, 0.04);
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.45;
 }
 
 .panel-header h2 {

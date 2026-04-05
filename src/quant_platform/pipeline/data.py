@@ -52,6 +52,19 @@ OPTIONAL_PARQUET_COLUMNS = [
     "macro_rate",
 ]
 
+ASSESSMENT_ANALYSIS_COLUMNS = [
+    "entity_id",
+    "ticker",
+    "effective_at",
+    "known_at",
+    "ingested_at",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+]
+
 NUMERIC_COLUMNS = [
     "open",
     "high",
@@ -246,6 +259,7 @@ def build_synthetic_dataset(
 
     frame = pd.DataFrame(records).sort_values(["effective_at", "ticker"]).reset_index(drop=True)
     news_frame = pd.DataFrame(news_events).sort_values(["known_at", "event_scope", "ticker"], na_position="last").reset_index(drop=True)
+    assessment = _build_dataset_assessment_from_frame(frame)
     dataset_folder = DATASET_DIR / dataset_id
     dataset_folder.mkdir(parents=True, exist_ok=True)
     raw_path = RAW_DATA_DIR / f"{dataset_id}_raw.csv"
@@ -266,6 +280,7 @@ def build_synthetic_dataset(
             "optional_columns_present": OPTIONAL_PARQUET_COLUMNS,
             "extra_columns": [],
         },
+        "assessment": assessment,
         "news_events": {
             "rows": int(len(news_frame)),
             "ticker_news_rows": int((news_frame["event_scope"] == "ticker").sum()),
@@ -447,6 +462,7 @@ def _build_import_summary(
     sample_tickers = sorted(pc.unique(pc.cast(table["ticker"], "string")).to_pylist())[:5]
     sectors = sorted(pc.unique(pc.cast(table["sector"], "string")).to_pylist())
     optional_present = [column for column in OPTIONAL_PARQUET_COLUMNS if column in table.column_names]
+    assessment = _build_dataset_assessment_from_table(table)
     return {
         "rows": int(table.num_rows),
         "tickers": int(pc.count_distinct(pc.cast(table["ticker"], "string")).as_py()),
@@ -465,6 +481,7 @@ def _build_import_summary(
                 if column not in REQUIRED_PARQUET_COLUMNS and column not in OPTIONAL_PARQUET_COLUMNS
             ),
         },
+        "assessment": assessment,
         "news_events": news_events_summary or {"rows": 0},
         "artifacts": {
             "pit_path": str(pit_path),
@@ -472,4 +489,405 @@ def _build_import_summary(
             "source_manifest": str(source_manifest_path),
             **(news_events_summary.get("artifacts", {}) if news_events_summary else {}),
         },
+    }
+
+
+def _build_dataset_assessment_from_table(table: Any) -> dict[str, object]:
+    column_names = list(table.column_names)
+    null_counts = {column: int(table[column].null_count) for column in column_names}
+    analysis_columns = [column for column in ASSESSMENT_ANALYSIS_COLUMNS if column in column_names]
+    analysis_frame = table.select(analysis_columns).to_pandas() if analysis_columns else pd.DataFrame(index=range(int(table.num_rows)))
+    return _build_dataset_assessment(
+        row_count=int(table.num_rows),
+        observed_columns=column_names,
+        column_null_counts=null_counts,
+        analysis_frame=analysis_frame,
+    )
+
+
+def _build_dataset_assessment_from_frame(frame: pd.DataFrame) -> dict[str, object]:
+    column_names = [str(column) for column in frame.columns]
+    null_counts = {column: int(frame[column].isna().sum()) for column in frame.columns}
+    analysis_columns = [column for column in ASSESSMENT_ANALYSIS_COLUMNS if column in frame.columns]
+    analysis_frame = frame.loc[:, analysis_columns].copy() if analysis_columns else pd.DataFrame(index=frame.index)
+    return _build_dataset_assessment(
+        row_count=int(len(frame)),
+        observed_columns=column_names,
+        column_null_counts=null_counts,
+        analysis_frame=analysis_frame,
+    )
+
+
+def _build_dataset_assessment(
+    row_count: int,
+    observed_columns: list[str],
+    column_null_counts: dict[str, int],
+    analysis_frame: pd.DataFrame,
+) -> dict[str, object]:
+    present_required = [column for column in REQUIRED_PARQUET_COLUMNS if column in observed_columns]
+    present_optional = [column for column in OPTIONAL_PARQUET_COLUMNS if column in observed_columns]
+    column_completeness: dict[str, dict[str, object]] = {}
+    required_missing_cells = 0
+
+    for column in [*present_required, *present_optional]:
+        missing_values = int(column_null_counts.get(column, 0))
+        non_null_pct = 100.0 if row_count == 0 else round(((row_count - missing_values) / row_count) * 100.0, 2)
+        column_completeness[column] = {
+            "non_null_pct": non_null_pct,
+            "missing_values": missing_values,
+            "required": column in REQUIRED_PARQUET_COLUMNS,
+        }
+        if column in REQUIRED_PARQUET_COLUMNS:
+            required_missing_cells += missing_values
+
+    required_cell_total = row_count * len(REQUIRED_PARQUET_COLUMNS)
+    completeness_pct = 100.0 if required_cell_total == 0 else round(((required_cell_total - required_missing_cells) / required_cell_total) * 100.0, 2)
+
+    entity_id_raw = _analysis_series(analysis_frame, "entity_id").astype("string").str.strip()
+    ticker_raw = _analysis_series(analysis_frame, "ticker").astype("string").str.strip()
+    effective_raw = _analysis_series(analysis_frame, "effective_at")
+    known_raw = _analysis_series(analysis_frame, "known_at")
+    ingested_raw = _analysis_series(analysis_frame, "ingested_at")
+    open_raw = _analysis_series(analysis_frame, "open")
+    high_raw = _analysis_series(analysis_frame, "high")
+    low_raw = _analysis_series(analysis_frame, "low")
+    close_raw = _analysis_series(analysis_frame, "close")
+    volume_raw = _analysis_series(analysis_frame, "volume")
+
+    effective_ts = pd.to_datetime(effective_raw, errors="coerce", utc=True)
+    known_ts = pd.to_datetime(known_raw, errors="coerce", utc=True)
+    ingested_ts = pd.to_datetime(ingested_raw, errors="coerce", utc=True)
+
+    invalid_effective_mask = effective_ts.isna() & effective_raw.notna()
+    invalid_known_mask = known_ts.isna() & known_raw.notna()
+    invalid_ingested_mask = ingested_ts.isna() & ingested_raw.notna()
+    invalid_timestamp_mask = invalid_effective_mask | invalid_known_mask | invalid_ingested_mask
+    invalid_timestamp_rows = int(invalid_timestamp_mask.sum())
+
+    open_num = pd.to_numeric(open_raw, errors="coerce")
+    high_num = pd.to_numeric(high_raw, errors="coerce")
+    low_num = pd.to_numeric(low_raw, errors="coerce")
+    close_num = pd.to_numeric(close_raw, errors="coerce")
+    volume_num = pd.to_numeric(volume_raw, errors="coerce")
+
+    invalid_numeric_mask = (
+        ((open_num.isna() & open_raw.notna()))
+        | ((high_num.isna() & high_raw.notna()))
+        | ((low_num.isna() & low_raw.notna()))
+        | ((close_num.isna() & close_raw.notna()))
+        | ((volume_num.isna() & volume_raw.notna()))
+    )
+    invalid_numeric_rows = int(invalid_numeric_mask.sum())
+
+    ordered_rows = effective_ts.notna() & known_ts.notna() & ingested_ts.notna()
+    timestamp_order_mask = ordered_rows & (
+        (known_ts < effective_ts)
+        | (ingested_ts < known_ts)
+        | (ingested_ts < effective_ts)
+    )
+    timestamp_order_violations = int(timestamp_order_mask.sum())
+
+    price_rows = open_num.notna() & high_num.notna() & low_num.notna() & close_num.notna()
+    ohlc_violation_mask = price_rows & (
+        (high_num < low_num)
+        | (high_num < open_num)
+        | (high_num < close_num)
+        | (low_num > open_num)
+        | (low_num > close_num)
+    )
+    ohlc_violations = int(ohlc_violation_mask.sum())
+
+    non_positive_price_mask = price_rows & (
+        (open_num <= 0)
+        | (high_num <= 0)
+        | (low_num <= 0)
+        | (close_num <= 0)
+    )
+    non_positive_price_rows = int(non_positive_price_mask.sum())
+
+    non_positive_volume_mask = volume_num.notna() & (volume_num <= 0)
+    non_positive_volume_rows = int(non_positive_volume_mask.sum())
+
+    quality_issue_mask = (
+        invalid_timestamp_mask
+        | invalid_numeric_mask
+        | timestamp_order_mask
+        | ohlc_violation_mask
+        | non_positive_price_mask
+        | non_positive_volume_mask
+    )
+    quality_issue_rows = int(quality_issue_mask.sum())
+    quality_pct = 100.0 if row_count == 0 else round(((row_count - quality_issue_rows) / row_count) * 100.0, 2)
+
+    gaps = _build_gap_summary(entity_id_raw, ticker_raw, effective_ts)
+    continuity_pct = float(gaps["continuity_pct"])
+
+    score_pct = round((0.45 * completeness_pct) + (0.35 * continuity_pct) + (0.20 * quality_pct), 2)
+    if int(gaps["missing_sessions"]) > 0 or int(gaps["duplicate_key_rows"]) > 0:
+        score_pct -= 3.0
+    if int(gaps["instruments_with_gaps"]) > 0:
+        score_pct -= min(6.0, (int(gaps["instruments_with_gaps"]) / max(int(gaps["instrument_count"]), 1)) * 10.0)
+    if quality_issue_rows > 0:
+        score_pct -= min(18.0, (quality_issue_rows / max(row_count, 1)) * 300.0)
+    score_pct = round(float(np.clip(score_pct, 0.0, 100.0)), 2)
+
+    issues: list[dict[str, object]] = []
+    if row_count == 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Empty dataset",
+                "No rows were available to inspect, so completeness and quality checks could not validate the snapshot.",
+                0,
+                "Re-run the source export before promoting this dataset into feature generation.",
+            )
+        )
+    if required_missing_cells > 0:
+        issues.append(
+            _issue(
+                "critical" if completeness_pct < 95.0 else "warning",
+                "Missing required values",
+                f"{required_missing_cells} required PIT cells are blank across the imported snapshot.",
+                required_missing_cells,
+                "Backfill or drop rows with missing required PIT fields before materializing features.",
+            )
+        )
+    if int(gaps["missing_sessions"]) > 0:
+        issues.append(
+            _issue(
+                "critical" if continuity_pct < 95.0 else "warning",
+                "Missing trading sessions",
+                f"{gaps['missing_sessions']} interior sessions are missing across {gaps['instruments_with_gaps']} instruments; the largest gap spans {gaps['largest_gap_sessions']} sessions.",
+                int(gaps["missing_sessions"]),
+                "Re-run the vendor extract or backfill the missing sessions before downstream modeling.",
+            )
+        )
+    if int(gaps["duplicate_key_rows"]) > 0:
+        issues.append(
+            _issue(
+                "warning",
+                "Duplicate entity-date keys",
+                f"{gaps['duplicate_key_rows']} duplicate rows share the same entity/date key and should be deduplicated before training.",
+                int(gaps["duplicate_key_rows"]),
+                "Deduplicate on entity_id + effective_at or confirm why multiple rows are expected for the same session.",
+            )
+        )
+    if invalid_timestamp_rows > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Unparseable timestamps",
+                f"{invalid_timestamp_rows} rows contain timestamp values that could not be parsed cleanly.",
+                invalid_timestamp_rows,
+                "Normalize effective_at, known_at, and ingested_at into valid ISO timestamps before using the dataset.",
+            )
+        )
+    if timestamp_order_violations > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Timestamp ordering violations",
+                f"{timestamp_order_violations} rows violate the expected PIT ordering of effective_at <= known_at <= ingested_at.",
+                timestamp_order_violations,
+                "Repair PIT lineage ordering so downstream features cannot leak future information.",
+            )
+        )
+    if invalid_numeric_rows > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Non-numeric market values",
+                f"{invalid_numeric_rows} rows contain OHLCV fields that could not be parsed as numbers.",
+                invalid_numeric_rows,
+                "Clean or coerce invalid OHLCV values before passing the snapshot into feature engineering.",
+            )
+        )
+    if ohlc_violations > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "OHLC consistency failures",
+                f"{ohlc_violations} rows contain price bars where high/low/open/close are internally inconsistent.",
+                ohlc_violations,
+                "Repair malformed bars or remove affected rows before using the dataset in model training.",
+            )
+        )
+    if non_positive_price_rows > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Non-positive prices",
+                f"{non_positive_price_rows} rows contain zero or negative open/high/low/close values.",
+                non_positive_price_rows,
+                "Filter or repair rows with impossible price values before feature generation.",
+            )
+        )
+    if non_positive_volume_rows > 0:
+        issues.append(
+            _issue(
+                "critical",
+                "Non-positive volume",
+                f"{non_positive_volume_rows} rows contain zero or negative volume values.",
+                non_positive_volume_rows,
+                "Repair or remove rows with impossible volume values before training.",
+            )
+        )
+
+    critical_issue_count = sum(1 for issue in issues if issue["severity"] == "critical")
+    warning_issue_count = sum(1 for issue in issues if issue["severity"] == "warning")
+
+    if row_count == 0 or critical_issue_count > 0 or quality_pct < 95.0 or continuity_pct < 95.0:
+        status = "critical"
+        data_level = "low"
+    elif warning_issue_count > 0 or completeness_pct < 99.0 or score_pct < 99.0:
+        status = "warning"
+        data_level = "medium"
+    else:
+        status = "healthy"
+        data_level = "high"
+
+    return {
+        "data_level": data_level,
+        "status": status,
+        "score_pct": score_pct,
+        "completeness_pct": completeness_pct,
+        "continuity_pct": continuity_pct,
+        "quality_pct": quality_pct,
+        "inspected_rows": row_count,
+        "required_missing_cells": required_missing_cells,
+        "column_completeness": column_completeness,
+        "gaps": gaps,
+        "quality_checks": {
+            "invalid_timestamp_rows": invalid_timestamp_rows,
+            "invalid_numeric_rows": invalid_numeric_rows,
+            "timestamp_order_violations": timestamp_order_violations,
+            "ohlc_violations": ohlc_violations,
+            "non_positive_price_rows": non_positive_price_rows,
+            "non_positive_volume_rows": non_positive_volume_rows,
+        },
+        "issue_counts": {
+            "critical": critical_issue_count,
+            "warning": warning_issue_count,
+        },
+        "issues": issues,
+    }
+
+
+def _build_gap_summary(
+    entity_ids: pd.Series,
+    tickers: pd.Series,
+    effective_ts: pd.Series,
+) -> dict[str, object]:
+    instrument_keys = entity_ids.fillna("").astype("string").str.strip()
+    instrument_labels = tickers.fillna("").astype("string").str.strip()
+    effective_dates = effective_ts.dt.normalize()
+
+    coverage_frame = pd.DataFrame(
+        {
+            "instrument_key": instrument_keys,
+            "instrument_label": instrument_labels,
+            "effective_date": effective_dates,
+        }
+    )
+    valid = coverage_frame[
+        coverage_frame["instrument_key"].fillna("").str.len().gt(0)
+        & coverage_frame["effective_date"].notna()
+    ].copy()
+    if valid.empty:
+        return {
+            "instrument_count": 0,
+            "dataset_sessions": 0,
+            "expected_rows": 0,
+            "observed_unique_keys": 0,
+            "duplicate_key_rows": 0,
+            "instruments_with_gaps": 0,
+            "gap_free_instruments_pct": 100.0,
+            "missing_sessions": 0,
+            "largest_gap_sessions": 0,
+            "continuity_pct": 100.0,
+            "gap_samples": [],
+        }
+
+    valid.loc[valid["instrument_label"].fillna("").str.len().eq(0), "instrument_label"] = valid["instrument_key"]
+    unique_keys = valid.drop_duplicates(subset=["instrument_key", "effective_date"])
+    global_dates = pd.DatetimeIndex(sorted(unique_keys["effective_date"].unique()))
+    date_positions = {date_value: index for index, date_value in enumerate(global_dates)}
+
+    expected_rows = 0
+    missing_sessions = 0
+    instruments_with_gaps = 0
+    gap_free_instruments = 0
+    largest_gap_sessions = 0
+    gap_samples: list[dict[str, object]] = []
+
+    for instrument_key, group in unique_keys.groupby("instrument_key", sort=True):
+        present_dates = pd.DatetimeIndex(sorted(group["effective_date"].unique()))
+        positions = np.array([date_positions[date_value] for date_value in present_dates], dtype=int)
+        if positions.size == 0:
+            continue
+
+        expected_for_instrument = int(positions[-1] - positions[0] + 1)
+        expected_rows += expected_for_instrument
+        missing_for_instrument = int(expected_for_instrument - positions.size)
+
+        if missing_for_instrument <= 0:
+            gap_free_instruments += 1
+            continue
+
+        instruments_with_gaps += 1
+        missing_sessions += missing_for_instrument
+        gap_sizes = (np.diff(positions) - 1) if positions.size > 1 else np.array([], dtype=int)
+        largest_gap_sessions = max(largest_gap_sessions, int(gap_sizes.max()) if gap_sizes.size else 0)
+
+        if len(gap_samples) < 5:
+            missing_dates = global_dates[positions[0] : positions[-1] + 1].difference(present_dates)
+            label = str(group["instrument_label"].iloc[0] or instrument_key)
+            gap_samples.append(
+                {
+                    "instrument": label,
+                    "missing_sessions": missing_for_instrument,
+                    "sample_dates": [str(date_value.date()) for date_value in missing_dates[:3]],
+                }
+            )
+
+    observed_unique_keys = int(len(unique_keys))
+    instrument_count = int(unique_keys["instrument_key"].nunique())
+    duplicate_key_rows = int(len(valid) - observed_unique_keys)
+    continuity_pct = 100.0 if expected_rows == 0 else round((observed_unique_keys / expected_rows) * 100.0, 2)
+    gap_free_instruments_pct = 100.0 if instrument_count == 0 else round((gap_free_instruments / instrument_count) * 100.0, 2)
+
+    return {
+        "instrument_count": instrument_count,
+        "dataset_sessions": int(len(global_dates)),
+        "expected_rows": int(expected_rows),
+        "observed_unique_keys": observed_unique_keys,
+        "duplicate_key_rows": duplicate_key_rows,
+        "instruments_with_gaps": instruments_with_gaps,
+        "gap_free_instruments_pct": gap_free_instruments_pct,
+        "missing_sessions": missing_sessions,
+        "largest_gap_sessions": largest_gap_sessions,
+        "continuity_pct": continuity_pct,
+        "gap_samples": gap_samples,
+    }
+
+
+def _analysis_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame.columns:
+        return frame[column]
+    return pd.Series(index=frame.index, dtype="object")
+
+
+def _issue(
+    severity: str,
+    title: str,
+    detail: str,
+    count: int,
+    recommendation: str,
+) -> dict[str, object]:
+    return {
+        "severity": severity,
+        "title": title,
+        "detail": detail,
+        "count": int(count),
+        "recommendation": recommendation,
     }

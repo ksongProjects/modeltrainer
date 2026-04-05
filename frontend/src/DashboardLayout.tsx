@@ -23,8 +23,10 @@ interface DashboardLayoutRow {
 }
 
 const STORAGE_PREFIX = "quant-platform-dashboard-layout:";
+const COLLAPSE_STORAGE_PREFIX = "quant-platform-dashboard-layout-collapsed:";
 const MAX_PANELS_PER_ROW = 2;
 const MIN_PANEL_SHARE = 0.28;
+const SEPARATOR_WIDTH = 10;
 
 function buildDefaultRows(panelIds: string[], defaultRows?: string[][]): DashboardLayoutRow[] {
   const rows = defaultRows?.length
@@ -107,6 +109,47 @@ function sanitizeRows(rawRows: unknown, panelIds: string[], defaultRows?: string
   }));
 }
 
+function sanitizeCollapsedPanels(rawPanels: unknown, panelIds: string[]): Record<string, boolean> {
+  if (!rawPanels || typeof rawPanels !== "object") {
+    return {};
+  }
+
+  const panelIdSet = new Set(panelIds);
+
+  return Object.entries(rawPanels as Record<string, unknown>).reduce<Record<string, boolean>>((nextPanels, [panelId, value]) => {
+    if (panelIdSet.has(panelId) && Boolean(value)) {
+      nextPanels[panelId] = true;
+    }
+    return nextPanels;
+  }, {});
+}
+
+function loadStoredRows(storageKey: string, panelIds: string[], defaultRows?: string[][]): DashboardLayoutRow[] {
+  if (typeof window === "undefined") {
+    return buildDefaultRows(panelIds, defaultRows);
+  }
+
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    return sanitizeRows(stored ? JSON.parse(stored) : null, panelIds, defaultRows);
+  } catch {
+    return buildDefaultRows(panelIds, defaultRows);
+  }
+}
+
+function loadCollapsedPanels(storageKey: string, panelIds: string[]): Record<string, boolean> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    return sanitizeCollapsedPanels(stored ? JSON.parse(stored) : null, panelIds);
+  } catch {
+    return {};
+  }
+}
+
 function movePanelBetweenRows(rows: DashboardLayoutRow[], panelId: string, direction: "up" | "down"): DashboardLayoutRow[] {
   const nextRows = rows.map((row) => ({
     panelIds: [...row.panelIds],
@@ -176,23 +219,18 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
   const panelSignature = panelIds.join("|");
   const defaultRowsSignature = JSON.stringify(defaultRows ?? []);
   const storageKey = `${STORAGE_PREFIX}${layoutKey}`;
+  const collapseStorageKey = `${COLLAPSE_STORAGE_PREFIX}${layoutKey}`;
   const dragState = useRef<{ rowIndex: number; startWidth: number; rowWidth: number; startX: number } | null>(null);
-  const [rows, setRows] = useState<DashboardLayoutRow[]>(() => {
-    if (typeof window === "undefined") {
-      return buildDefaultRows(panelIds, defaultRows);
-    }
-
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      return sanitizeRows(stored ? JSON.parse(stored) : null, panelIds, defaultRows);
-    } catch {
-      return buildDefaultRows(panelIds, defaultRows);
-    }
-  });
+  const [rows, setRows] = useState<DashboardLayoutRow[]>(() => loadStoredRows(storageKey, panelIds, defaultRows));
+  const [collapsedPanels, setCollapsedPanels] = useState<Record<string, boolean>>(() => loadCollapsedPanels(collapseStorageKey, panelIds));
 
   useEffect(() => {
-    setRows((currentRows) => sanitizeRows(currentRows, panelIds, defaultRows));
-  }, [defaultRowsSignature, panelSignature]);
+    setRows(loadStoredRows(storageKey, panelIds, defaultRows));
+  }, [defaultRowsSignature, panelSignature, storageKey]);
+
+  useEffect(() => {
+    setCollapsedPanels(loadCollapsedPanels(collapseStorageKey, panelIds));
+  }, [collapseStorageKey, panelSignature]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -201,6 +239,14 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
 
     window.localStorage.setItem(storageKey, JSON.stringify(rows));
   }, [rows, storageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(collapseStorageKey, JSON.stringify(collapsedPanels));
+  }, [collapsedPanels, collapseStorageKey]);
 
   useEffect(() => {
     function handlePointerMove(event: PointerEvent) {
@@ -263,6 +309,13 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
     setRows((currentRows) => movePanelBetweenRows(currentRows, panelId, direction));
   }
 
+  function togglePanelCollapse(panelId: string) {
+    setCollapsedPanels((currentPanels) => ({
+      ...currentPanels,
+      [panelId]: !currentPanels[panelId]
+    }));
+  }
+
   return (
     <div className="panel-layout">
       {rows.map((row, rowIndex) => {
@@ -271,7 +324,7 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
           .filter((panel): panel is DashboardLayoutEntry => Boolean(panel));
         const isSplitRow = rowPanels.length === 2;
         const rowStyle = isSplitRow
-          ? { gridTemplateColumns: `minmax(0, ${row.widths[0]}fr) 14px minmax(0, ${row.widths[1]}fr)` }
+          ? { gridTemplateColumns: `minmax(0, ${row.widths[0]}fr) ${SEPARATOR_WIDTH}px minmax(0, ${row.widths[1]}fr)` }
           : undefined;
 
         return (
@@ -279,11 +332,25 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
             {rowPanels.flatMap((panel, panelIndex) => {
               const canMoveUp = rowIndex > 0;
               const canMoveDown = rowIndex < rows.length - 1;
+              const isCollapsed = Boolean(collapsedPanels[panel.id]);
               const panelNode = (
-                <div key={panel.id} className="panel-layout-cell">
+                <div key={panel.id} className={`panel-layout-cell ${isCollapsed ? "is-collapsed" : ""}`}>
                   <div className="panel-layout-toolbar">
                     <span>{panel.label}</span>
                     <div className="panel-layout-actions">
+                      <button
+                        type="button"
+                        className={`panel-layout-button panel-collapse-button ${isCollapsed ? "is-collapsed" : ""}`}
+                        onClick={() => togglePanelCollapse(panel.id)}
+                        aria-expanded={!isCollapsed}
+                        aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${panel.label}`}
+                        title={`${isCollapsed ? "Expand" : "Collapse"} ${panel.label}`}
+                      >
+                        <span className="panel-collapse-glyph" aria-hidden="true">
+                          {isCollapsed ? "+" : "-"}
+                        </span>
+                        {isCollapsed ? "Expand" : "Collapse"}
+                      </button>
                       <button
                         type="button"
                         className="panel-layout-button"
@@ -304,7 +371,11 @@ export function DashboardLayout({ children, defaultRows, layoutKey, panels }: Da
                       </button>
                     </div>
                   </div>
-                  {panel.content}
+                  {isCollapsed ? (
+                    <div className="panel-layout-collapsed-state">Section collapsed. Expand when you want the full panel back.</div>
+                  ) : (
+                    <div className="panel-layout-body">{panel.content}</div>
+                  )}
                 </div>
               );
 
