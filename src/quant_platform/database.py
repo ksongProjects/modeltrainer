@@ -51,6 +51,26 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS research_layers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        description TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS research_layer_controls (
+        layer_id TEXT PRIMARY KEY,
+        overrides_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS factor_definitions (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,

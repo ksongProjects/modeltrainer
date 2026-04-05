@@ -9,14 +9,37 @@ from pathlib import Path
 from typing import Any
 
 from ..database import connect, init_db, utcnow
+from ..layer_controls import (
+    research_layer_control_defaults,
+    research_layer_model_catalog,
+    research_layer_process_steps,
+    research_layer_runtime_catalog,
+    sanitize_runtime_settings,
+)
 from ..pipeline.data import build_synthetic_dataset, import_parquet_dataset
 from ..pipeline.features import materialize_features
 from ..pipeline.testing import run_testing_suite
 from ..pipeline.training import train_model
+from ..runtime_profiles import runtime_capabilities, runtime_self_check
+from ..research_layers import (
+    LAYER_FUNDAMENTAL_SIGNAL,
+    LAYER_EXECUTION_POLICY,
+    LAYER_FEATURE_STORE,
+    LAYER_FUSION_DECISION,
+    LAYER_MACRO_REGIME,
+    LAYER_PORTFOLIO_CONSTRUCTION,
+    LAYER_PRICE_SIGNAL,
+    LAYER_SNAPSHOT_SIGNAL,
+    LAYER_SENTIMENT_SIGNAL,
+    LAYER_DATA_FOUNDATION,
+    RESEARCH_LAYER_ORDER,
+    research_architecture_manifest,
+)
 from ..schemas import (
     DatasetCreateRequest,
     DatasetImportRequest,
     FeatureMaterializationRequest,
+    ResearchLayerControlRequest,
     SavedDatasetTagRequest,
     TestingRunRequest,
     TrainingRunRequest,
@@ -43,7 +66,7 @@ class ControlPlane:
     def overview(self) -> dict[str, Any]:
         counts = {}
         with connect() as connection:
-            for table in ("dataset_versions", "feature_set_versions", "model_versions", "training_runs", "testing_runs"):
+            for table in ("dataset_versions", "feature_set_versions", "model_versions", "training_runs", "testing_runs", "research_layers"):
                 counts[table] = connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
         return {
             "counts": counts,
@@ -58,12 +81,56 @@ class ControlPlane:
             "data_sources": self._list_table("data_sources"),
             "universes": self._list_table("universe_definitions"),
             "factors": self._list_table("factor_definitions"),
+            "research_layers": self.list_research_layers(),
             "model_specs": self._list_table("model_specs"),
             "acceptance_policies": self._list_table("acceptance_policies"),
         }
 
+    def runtime_capabilities(self) -> dict[str, Any]:
+        return runtime_capabilities()
+
+    def runtime_self_check(self, request: dict[str, Any]) -> dict[str, Any]:
+        return runtime_self_check(
+            request,
+            model_kind=str(request.get("model_kind", "pytorch_mlp")),
+            input_dim=int(request.get("input_dim", 8)),
+        )
+
     def list_datasets(self) -> list[dict[str, Any]]:
         return [self._enrich_dataset_record(dataset) for dataset in self._list_table("dataset_versions")]
+
+    def list_research_layers(self) -> list[dict[str, Any]]:
+        layers = self._list_table("research_layers", limit=200)
+        order = {layer_id: index for index, layer_id in enumerate(RESEARCH_LAYER_ORDER)}
+        layers.sort(key=lambda layer: order.get(layer["id"], len(order)))
+        return [self._enrich_research_layer(layer) for layer in layers]
+
+    def get_research_layer(self, layer_id: str) -> dict[str, Any]:
+        return self._enrich_research_layer(self._get_table_row("research_layers", layer_id))
+
+    def research_architecture(self) -> dict[str, Any]:
+        layers = self.list_research_layers()
+        implemented = sum(1 for layer in layers if str(layer.get("status", "")).startswith("implemented"))
+        partial = sum(1 for layer in layers if "partial" in str(layer.get("status", "")))
+        planned = sum(1 for layer in layers if layer.get("status") == "planned")
+        return {
+            "layers": layers,
+            "orchestration": research_architecture_manifest(),
+            "summary": {
+                "implemented_layers": implemented,
+                "partially_implemented_layers": partial,
+                "planned_layers": planned,
+            },
+        }
+
+    def research_layer_observability(self, layer_id: str) -> dict[str, Any]:
+        self._get_table_row("research_layers", layer_id)
+        return self._layer_observability(layer_id)
+
+    def update_research_layer_controls(self, layer_id: str, request: ResearchLayerControlRequest) -> dict[str, Any]:
+        self._get_table_row("research_layers", layer_id)
+        self._upsert_layer_control_overrides(layer_id, request.model_dump(exclude_none=True))
+        return self.get_research_layer(layer_id)
 
     def list_dataset_tags(self) -> list[dict[str, Any]]:
         with connect() as connection:
@@ -164,12 +231,14 @@ class ControlPlane:
 
     def create_feature_set_version(self, request: FeatureMaterializationRequest) -> dict[str, Any]:
         feature_set_id = self._new_id("features")
+        feature_process_state = self._resolved_layer_process_state(LAYER_FEATURE_STORE)
         result = materialize_features(
             feature_set_id=feature_set_id,
             dataset_version_id=request.dataset_version_id,
             name=request.name,
             winsor_limit=request.winsor_limit,
             forecast_horizon_days=request.forecast_horizon_days,
+            process_step_state=feature_process_state,
         )
         record = {
             "id": feature_set_id,
@@ -350,6 +419,9 @@ class ControlPlane:
             self._set_stage("training", run_id, phase="phase0", stage="bootstrap", state="running")
             run = self.get_run("training", run_id)
             config = json.loads(run["config_json"])
+            if str(config.get("model_kind")) == "layered_decision":
+                config = self._apply_master_layer_controls(config)
+                self._update_table("training_runs", run_id, {"config_json": json.dumps(config), "updated_at": utcnow()})
             self._log_event(run_id, "training", "phase0", "bootstrap", "status", "info", "Bootstrapping training pipeline.", 2.5, config)
             dataset_version_id = run["dataset_version_id"]
             if not dataset_version_id:
@@ -378,8 +450,10 @@ class ControlPlane:
                     name=f"{config['name']} Feature Set",
                     winsor_limit=3.0,
                     forecast_horizon_days=int(config["horizon_days"]),
+                    process_step_state=self._resolved_layer_process_state(LAYER_FEATURE_STORE),
                 )
                 for trace in trace_result.traces[:6]:
+                    trace.setdefault("provenance", {})["layer_id"] = LAYER_FEATURE_STORE
                     self._log_trace(run_id, "training", "phase2", "feature-materialization", trace)
 
             model_version_id = self._new_id("model")
@@ -409,10 +483,84 @@ class ControlPlane:
                 config=config,
                 checkpoint_hook=checkpoint_hook,
             )
+            primary_layer_id = LAYER_FUSION_DECISION if str(config["model_kind"]) == "layered_decision" else LAYER_SNAPSHOT_SIGNAL
             for warning in training_result.warnings:
                 self._log_event(run_id, "training", "phase3", "model-training", "warning", "warning", warning, 70.0, {})
             for metric_name, metric_value in training_result.metrics.items():
-                self._log_metric(run_id, "training", "phase3", "model-training", "training", metric_name, metric_value, 0, {})
+                self._log_metric(
+                    run_id,
+                    "training",
+                    "phase3",
+                    "model-training",
+                    "training",
+                    metric_name,
+                    metric_value,
+                    0,
+                    {"layer_id": primary_layer_id, "model_kind": str(config["model_kind"])},
+                )
+            for layer_id, layer_metric_map in (training_result.layer_metrics or {}).items():
+                for metric_name, metric_value in layer_metric_map.items():
+                    self._log_metric(
+                        run_id,
+                        "training",
+                        "phase3",
+                        "model-training",
+                        "training",
+                        metric_name,
+                        metric_value,
+                        0,
+                        {"layer_id": layer_id, "model_kind": str(config["model_kind"])},
+                    )
+            for layer_id, comparison in (training_result.layer_comparisons or {}).items():
+                for model_kind, metric_map in comparison.get("candidate_metrics", {}).items():
+                    for metric_name, metric_value in metric_map.items():
+                        self._log_metric(
+                            run_id,
+                            "training",
+                            "phase3",
+                            "model-training",
+                            "comparison",
+                            metric_name,
+                            metric_value,
+                            0,
+                            {
+                                "layer_id": layer_id,
+                                "compared_model_kind": model_kind,
+                                "selected_model_kind": comparison.get("selected_model_kind"),
+                            },
+                        )
+                self._log_trace(
+                    run_id,
+                    "training",
+                    "phase3",
+                    "model-training",
+                    {
+                        "formula_id": "phase3.layer_comparison.selection",
+                        "label": layer_id,
+                        "inputs": {
+                            "selection_metric": comparison.get("selection_metric"),
+                            "feature_columns": comparison.get("feature_columns"),
+                        },
+                        "transformed_inputs": {
+                            "process_step_state": comparison.get("process_step_state"),
+                            "candidate_models": list(comparison.get("candidate_metrics", {}).keys()),
+                            "runtime_settings": comparison.get("runtime_settings"),
+                        },
+                        "output": {
+                            "selected_model_kind": comparison.get("selected_model_kind"),
+                            "selected_metrics": comparison.get("candidate_metrics", {}).get(
+                                comparison.get("requested_model_kind"),
+                                comparison.get("candidate_metrics", {}).get(comparison.get("selected_model_kind"), {}),
+                            ),
+                            "runtime_summary": comparison.get("runtime_summary"),
+                        },
+                        "units": "model_selection",
+                        "provenance": {
+                            "layer_id": layer_id,
+                            "comparison_report_path": comparison.get("comparison_report_path"),
+                        },
+                    },
+                )
             self._set_stage("training", run_id, phase="phase3", stage="validation", state="running")
             self._log_event(run_id, "training", "phase3", "validation", "status", "info", "Validation complete; writing registry artifact.", 86.0, training_result.summary)
             model_record = {
@@ -428,8 +576,29 @@ class ControlPlane:
                 "updated_at": utcnow(),
             }
             self._insert("model_versions", model_record)
-            self._log_artifact(run_id, "training", "model_dir", str(training_result.artifact_dir), training_result.summary)
-            self._log_artifact(run_id, "training", "checkpoint_dir", str(training_result.artifact_dir / "checkpoints"), {"checkpoints": training_result.checkpoint_paths})
+            self._log_artifact(
+                run_id,
+                "training",
+                "model_dir",
+                str(training_result.artifact_dir),
+                {"layer_id": primary_layer_id, **training_result.summary},
+            )
+            self._log_artifact(
+                run_id,
+                "training",
+                "checkpoint_dir",
+                str(training_result.artifact_dir / "checkpoints"),
+                {"layer_id": primary_layer_id, "checkpoints": training_result.checkpoint_paths},
+            )
+            for layer_id, artifact_map in (training_result.layer_artifacts or {}).items():
+                for artifact_type, artifact_path in artifact_map.items():
+                    self._log_artifact(
+                        run_id,
+                        "training",
+                        artifact_type,
+                        artifact_path,
+                        {"layer_id": layer_id},
+                    )
             self._set_stage("training", run_id, phase="phase3", stage="registry", state="completed")
             self._log_event(run_id, "training", "phase3", "registry", "status", "info", "Training run completed and model version frozen.", 100.0, {"model_version_id": model_version_id})
         except RunStopped:
@@ -455,21 +624,32 @@ class ControlPlane:
                 stress_iterations=int(config["stress_iterations"]),
                 rebalance_decile=float(config["rebalance_decile"]),
                 execution_mode=str(config["execution_mode"]),
+                decision_top_k=int(config.get("decision_top_k", 10)),
             )
             for metric_name, metric_value in result.metrics.items():
                 group = "risk" if "var" in metric_name or "drawdown" in metric_name or "ruin" in metric_name else "testing"
                 if "slippage" in metric_name or "shortfall" in metric_name or "vpin" in metric_name:
                     group = "execution"
-                self._log_metric(run_id, "testing", "phase6", "backtest", group, metric_name, metric_value, 0, {})
+                layer_id = LAYER_EXECUTION_POLICY if group == "execution" else LAYER_PORTFOLIO_CONSTRUCTION
+                self._log_metric(run_id, "testing", "phase6", "backtest", group, metric_name, metric_value, 0, {"layer_id": layer_id})
             for trace in result.traces:
                 stage = "execution-simulation" if "execution" in trace["formula_id"] else "backtest"
+                trace.setdefault("provenance", {})["layer_id"] = (
+                    LAYER_EXECUTION_POLICY if stage == "execution-simulation" else LAYER_PORTFOLIO_CONSTRUCTION
+                )
                 self._log_trace(run_id, "testing", "phase6", stage, trace)
             self._set_stage("testing", run_id, phase="phase7", stage="execution-simulation", state="running")
             self._log_event(run_id, "testing", "phase7", "execution-simulation", "status", "info", "Execution simulation complete.", 78.0, result.summary)
             self._set_stage("testing", run_id, phase="phase8", stage="monitoring", state="running")
             self._log_event(run_id, "testing", "phase8", "monitoring", "status", "info", "Monitoring metrics refreshed.", 92.0, self.monitoring_summary())
             for artifact_type, artifact_path in result.artifacts.items():
-                self._log_artifact(run_id, "testing", artifact_type, artifact_path, {})
+                if artifact_type == "execution_timeline":
+                    layer_id = LAYER_EXECUTION_POLICY
+                elif artifact_type == "final_decision_report":
+                    layer_id = LAYER_FUSION_DECISION
+                else:
+                    layer_id = LAYER_PORTFOLIO_CONSTRUCTION
+                self._log_artifact(run_id, "testing", artifact_type, artifact_path, {"layer_id": layer_id})
             self._set_stage("testing", run_id, phase="phase8", stage="monitoring", state="completed")
             self._log_event(run_id, "testing", "phase8", "monitoring", "status", "info", "Testing run completed.", 100.0, {"model_version_id": run["model_version_id"]})
         except RunStopped:
@@ -648,6 +828,251 @@ class ControlPlane:
         enriched["tags"] = self._normalize_tags([*manual_tags, *auto_tags])
         return enriched
 
+    def _enrich_research_layer(self, layer: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(layer)
+        config = enriched.get("config") if isinstance(enriched.get("config"), dict) else {}
+        layer_id = str(enriched["id"])
+        enriched["depends_on"] = config.get("depends_on", [])
+        enriched["implementation_mode"] = config.get("implementation_mode")
+        enriched["data_contract"] = config.get("data_contract", {})
+        enriched["control_surface"] = config.get("control_surface", {})
+        enriched["observability_contract"] = config.get("observability_contract", {})
+        enriched["model_catalog"] = self._resolved_model_catalog(layer_id)
+        enriched["runtime_catalog"] = research_layer_runtime_catalog(layer_id)
+        enriched["process_steps"] = self._resolved_process_steps(layer_id)
+        enriched["control_state"] = {
+            "preferred_model_kind": self._resolved_preferred_model_kind(layer_id),
+            "candidate_model_kinds": self._resolved_candidate_model_kinds(layer_id),
+            "selection_metric": self._resolved_selection_metric(layer_id),
+            "process_step_state": self._resolved_layer_process_state(layer_id),
+            "runtime_settings": self._resolved_layer_runtime_settings(layer_id),
+        }
+        enriched["latest_observability"] = self._layer_observability(layer_id)
+        enriched["latest_comparison"] = self._latest_layer_comparison(layer_id)
+        return enriched
+
+    def _get_layer_control_overrides(self, layer_id: str) -> dict[str, Any]:
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT overrides_json FROM research_layer_controls WHERE layer_id = ?",
+                (layer_id,),
+            ).fetchone()
+        return json.loads(row["overrides_json"]) if row and row["overrides_json"] else {}
+
+    def _upsert_layer_control_overrides(self, layer_id: str, updates: dict[str, Any]) -> None:
+        current = self._get_layer_control_overrides(layer_id)
+        current.update({key: value for key, value in updates.items() if value is not None})
+        valid_models = {candidate["kind"] for candidate in research_layer_model_catalog(layer_id).get("candidates", [])}
+        if current.get("preferred_model_kind") and valid_models and current["preferred_model_kind"] not in valid_models:
+            raise ValueError(f"Unsupported model kind for {layer_id}: {current['preferred_model_kind']}")
+        if "candidate_model_kinds" in current and valid_models:
+            current["candidate_model_kinds"] = [model_kind for model_kind in current.get("candidate_model_kinds", []) if model_kind in valid_models]
+        step_defaults = research_layer_control_defaults(layer_id).get("process_step_state", {})
+        non_disableable_steps = {
+            step["id"]
+            for step in research_layer_process_steps(layer_id)
+            if not step.get("can_disable", True)
+        }
+        if "process_step_state" in current:
+            current["process_step_state"] = {
+                step_id: True if step_id in non_disableable_steps else bool(enabled)
+                for step_id, enabled in current.get("process_step_state", {}).items()
+                if step_id in step_defaults
+            }
+        if "runtime_settings" in current:
+            current["runtime_settings"] = sanitize_runtime_settings(layer_id, current.get("runtime_settings"))
+        with connect() as connection:
+            existing = connection.execute(
+                "SELECT layer_id FROM research_layer_controls WHERE layer_id = ?",
+                (layer_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO research_layer_controls (layer_id, overrides_json, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (layer_id, json.dumps(current), utcnow(), utcnow()),
+                )
+            else:
+                connection.execute(
+                    "UPDATE research_layer_controls SET overrides_json = ?, updated_at = ? WHERE layer_id = ?",
+                    (json.dumps(current), utcnow(), layer_id),
+                )
+            connection.commit()
+
+    def _resolved_model_catalog(self, layer_id: str) -> dict[str, Any]:
+        catalog = dict(research_layer_model_catalog(layer_id))
+        if not catalog:
+            return {}
+        candidate_model_kinds = set(self._resolved_candidate_model_kinds(layer_id))
+        preferred_model_kind = self._resolved_preferred_model_kind(layer_id)
+        catalog["candidates"] = [
+            {
+                **candidate,
+                "enabled_for_comparison": candidate["kind"] in candidate_model_kinds,
+                "selected": candidate["kind"] == preferred_model_kind,
+            }
+            for candidate in catalog.get("candidates", [])
+        ]
+        catalog["selected_model_kind"] = preferred_model_kind
+        catalog["candidate_model_kinds"] = list(candidate_model_kinds)
+        catalog["selection_metric"] = self._resolved_selection_metric(layer_id)
+        return catalog
+
+    def _resolved_process_steps(self, layer_id: str) -> list[dict[str, Any]]:
+        state = self._resolved_layer_process_state(layer_id)
+        return [
+            {**step, "enabled": bool(state.get(step["id"], step.get("enabled_by_default", True)))}
+            for step in research_layer_process_steps(layer_id)
+        ]
+
+    def _resolved_preferred_model_kind(self, layer_id: str) -> str | None:
+        defaults = research_layer_control_defaults(layer_id)
+        overrides = self._get_layer_control_overrides(layer_id)
+        return overrides.get("preferred_model_kind", defaults.get("preferred_model_kind"))
+
+    def _resolved_candidate_model_kinds(self, layer_id: str) -> list[str]:
+        defaults = research_layer_control_defaults(layer_id)
+        overrides = self._get_layer_control_overrides(layer_id)
+        return list(overrides.get("candidate_model_kinds", defaults.get("candidate_model_kinds", [])))
+
+    def _resolved_selection_metric(self, layer_id: str) -> str | None:
+        defaults = research_layer_control_defaults(layer_id)
+        overrides = self._get_layer_control_overrides(layer_id)
+        return overrides.get("selection_metric", defaults.get("selection_metric"))
+
+    def _resolved_layer_process_state(self, layer_id: str) -> dict[str, bool]:
+        defaults = research_layer_control_defaults(layer_id).get("process_step_state", {})
+        overrides = self._get_layer_control_overrides(layer_id).get("process_step_state", {})
+        resolved = dict(defaults)
+        resolved.update({step_id: bool(enabled) for step_id, enabled in overrides.items() if step_id in defaults})
+        return resolved
+
+    def _resolved_layer_runtime_settings(self, layer_id: str) -> dict[str, Any]:
+        defaults = research_layer_control_defaults(layer_id).get("runtime_settings", {})
+        overrides = self._get_layer_control_overrides(layer_id).get("runtime_settings", {})
+        return sanitize_runtime_settings(layer_id, {**defaults, **overrides})
+
+    def _apply_master_layer_controls(self, config: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(config)
+        layer_configs = dict(enriched.get("layer_configs") or {})
+        global_runtime_settings = enriched.get("runtime_settings") if isinstance(enriched.get("runtime_settings"), dict) else {}
+        for layer_id in (
+            LAYER_PRICE_SIGNAL,
+            LAYER_FUNDAMENTAL_SIGNAL,
+            LAYER_SENTIMENT_SIGNAL,
+            LAYER_MACRO_REGIME,
+            LAYER_FUSION_DECISION,
+        ):
+            defaults = {
+                "model_kind": self._resolved_preferred_model_kind(layer_id),
+                "candidate_model_kinds": self._resolved_candidate_model_kinds(layer_id),
+                "selection_metric": self._resolved_selection_metric(layer_id),
+                "process_step_state": self._resolved_layer_process_state(layer_id),
+                "runtime_settings": {**global_runtime_settings, **self._resolved_layer_runtime_settings(layer_id)},
+            }
+            existing = dict(layer_configs.get(layer_id, {}))
+            existing_process_state = defaults["process_step_state"]
+            existing_process_state.update(existing.get("process_step_state", {}))
+            existing_runtime_settings = defaults["runtime_settings"]
+            existing_runtime_settings.update(existing.get("runtime_settings", {}))
+            layer_configs[layer_id] = {
+                **defaults,
+                **existing,
+                "process_step_state": existing_process_state,
+                "runtime_settings": sanitize_runtime_settings(layer_id, existing_runtime_settings),
+            }
+        enriched["layer_configs"] = layer_configs
+        return enriched
+
+    def _layer_observability(self, layer_id: str) -> dict[str, Any]:
+        if layer_id == LAYER_DATA_FOUNDATION:
+            dataset = self._list_table("dataset_versions", limit=1)
+            latest_dataset = self._enrich_dataset_record(dataset[0]) if dataset else None
+            return {
+                "latest_run": None,
+                "latest_metrics": latest_dataset.get("summary", {}) if latest_dataset else {},
+                "latest_artifacts": latest_dataset.get("summary", {}).get("artifacts", {}) if latest_dataset else {},
+                "latest_status": latest_dataset.get("status") if latest_dataset else "not_started",
+            }
+        if layer_id == LAYER_FEATURE_STORE:
+            feature_sets = self._list_table("feature_set_versions", limit=1)
+            latest_feature_set = feature_sets[0] if feature_sets else None
+            return {
+                "latest_run": None,
+                "latest_metrics": latest_feature_set.get("summary", {}) if latest_feature_set else {},
+                "latest_artifacts": latest_feature_set.get("summary", {}).get("artifacts", {}) if latest_feature_set else {},
+                "latest_status": latest_feature_set.get("status") if latest_feature_set else "not_started",
+            }
+        if layer_id == LAYER_SNAPSHOT_SIGNAL:
+            latest_model_versions = self._list_table("model_versions", limit=1)
+            latest_training_runs = self._list_table("training_runs", limit=1)
+            latest_model = latest_model_versions[0] if latest_model_versions else None
+            return {
+                "latest_run": latest_training_runs[0] if latest_training_runs else None,
+                "latest_metrics": self._latest_layer_metric_map(layer_id) or (latest_model.get("metrics", {}) if latest_model else {}),
+                "latest_artifacts": self._latest_layer_artifact_map(layer_id),
+                "latest_status": latest_training_runs[0]["state"] if latest_training_runs else (latest_model.get("status") if latest_model else "not_started"),
+            }
+        if layer_id in {LAYER_PRICE_SIGNAL, LAYER_FUNDAMENTAL_SIGNAL, LAYER_SENTIMENT_SIGNAL, LAYER_MACRO_REGIME, LAYER_FUSION_DECISION}:
+            latest_training_runs = self._list_table("training_runs", limit=1)
+            return {
+                "latest_run": latest_training_runs[0] if latest_training_runs else None,
+                "latest_metrics": self._latest_layer_metric_map(layer_id),
+                "latest_artifacts": self._latest_layer_artifact_map(layer_id),
+                "latest_status": latest_training_runs[0]["state"] if latest_training_runs else "not_started",
+            }
+        if layer_id in {LAYER_PORTFOLIO_CONSTRUCTION, LAYER_EXECUTION_POLICY}:
+            latest_testing_runs = self._list_table("testing_runs", limit=1)
+            return {
+                "latest_run": latest_testing_runs[0] if latest_testing_runs else None,
+                "latest_metrics": self._latest_layer_metric_map(layer_id),
+                "latest_artifacts": self._latest_layer_artifact_map(layer_id),
+                "latest_status": latest_testing_runs[0]["state"] if latest_testing_runs else "not_started",
+            }
+        return {
+            "latest_run": None,
+            "latest_metrics": {},
+            "latest_artifacts": {},
+            "latest_status": "planned",
+        }
+
+    def _latest_layer_metric_map(self, layer_id: str) -> dict[str, float]:
+        with connect() as connection:
+            rows = connection.execute("SELECT * FROM metric_records ORDER BY id DESC LIMIT 500").fetchall()
+        metric_map: dict[str, float] = {}
+        for row in rows:
+            parsed = self._deserialize_row(row)
+            metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+            if metadata.get("layer_id") != layer_id:
+                continue
+            metric_map.setdefault(str(parsed["name"]), float(parsed["value"]))
+        return metric_map
+
+    def _latest_layer_artifact_map(self, layer_id: str) -> dict[str, str]:
+        with connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifact_manifests ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+        artifacts: dict[str, str] = {}
+        for row in rows:
+            parsed = self._deserialize_row(row)
+            metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+            if metadata.get("layer_id") != layer_id:
+                continue
+            artifacts.setdefault(str(parsed["artifact_type"]), str(parsed["path"]))
+        return artifacts
+
+    def _latest_layer_comparison(self, layer_id: str) -> dict[str, Any] | None:
+        comparison_path = self._latest_layer_artifact_map(layer_id).get("comparison_report")
+        if not comparison_path:
+            return None
+        path = Path(comparison_path)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+
     def _derive_dataset_auto_tags(self, dataset: dict[str, Any]) -> list[str]:
         summary = dataset.get("summary") if isinstance(dataset.get("summary"), dict) else {}
         schema = summary.get("schema") if isinstance(summary, dict) and isinstance(summary.get("schema"), dict) else {}
@@ -732,6 +1157,12 @@ class ControlPlane:
         }
         if source_id in source_tags:
             auto_tags.append(source_tags[source_id])
+
+        news_events = summary.get("news_events") if isinstance(summary.get("news_events"), dict) else {}
+        if isinstance(news_events.get("rows"), (int, float)) and int(news_events.get("rows", 0)) > 0:
+            auto_tags.append("raw-text-news")
+            if int(news_events.get("macro_news_rows", 0) or 0) > 0:
+                auto_tags.append("macro-news")
 
         return self._normalize_tags(auto_tags)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -27,3 +28,20 @@ def ensure_directories() -> None:
         REPORT_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
+
+
+def server_runtime_config() -> dict[str, object]:
+    host = str(os.getenv("QUANT_PLATFORM_HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    port_raw = str(os.getenv("QUANT_PLATFORM_PORT", "8000")).strip()
+    reload_raw = str(os.getenv("QUANT_PLATFORM_RELOAD", "false")).strip().lower()
+    try:
+        port = int(port_raw)
+    except ValueError:
+        port = 8000
+    port = max(1, min(65535, port))
+    reload_enabled = reload_raw in {"1", "true", "yes", "on"}
+    return {
+        "host": host,
+        "port": port,
+        "reload": reload_enabled,
+    }

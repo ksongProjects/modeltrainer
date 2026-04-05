@@ -9,10 +9,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from .config import server_runtime_config
 from .schemas import (
     DatasetCreateRequest,
     DatasetImportRequest,
     FeatureMaterializationRequest,
+    ResearchLayerControlRequest,
+    RuntimeSelfCheckRequest,
     RunOverrideRequest,
     SavedDatasetTagRequest,
     TestingRunRequest,
@@ -44,6 +47,52 @@ def overview():
 @app.get("/api/catalog")
 def catalog():
     return control_plane.catalog()
+
+
+@app.get("/api/runtime-capabilities")
+def get_runtime_capabilities():
+    return control_plane.runtime_capabilities()
+
+
+@app.post("/api/runtime-self-check")
+def post_runtime_self_check(request: RuntimeSelfCheckRequest):
+    return control_plane.runtime_self_check(request.model_dump())
+
+
+@app.get("/api/research-layers")
+def list_research_layers():
+    return control_plane.list_research_layers()
+
+
+@app.get("/api/research-layers/{layer_id}")
+def get_research_layer(layer_id: str):
+    try:
+        return control_plane.get_research_layer(layer_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/research-layers/{layer_id}/observability")
+def research_layer_observability(layer_id: str):
+    try:
+        return control_plane.research_layer_observability(layer_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/research-layers/{layer_id}/controls")
+def update_research_layer_controls(layer_id: str, request: ResearchLayerControlRequest):
+    try:
+        return control_plane.update_research_layer_controls(layer_id, request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/research-architecture")
+def research_architecture():
+    return control_plane.research_architecture()
 
 
 @app.get("/api/datasets")
@@ -235,7 +284,13 @@ async def stream_run(run_kind: str, run_id: str) -> StreamingResponse:
 
 
 def run() -> None:
-    uvicorn.run("quant_platform.main:app", host="127.0.0.1", port=8000, reload=False)
+    runtime = server_runtime_config()
+    uvicorn.run(
+        "quant_platform.main:app",
+        host=str(runtime["host"]),
+        port=int(runtime["port"]),
+        reload=bool(runtime["reload"]),
+    )
 
 
 if __name__ == "__main__":

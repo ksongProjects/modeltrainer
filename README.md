@@ -187,6 +187,14 @@ quant-platform-api
 
 The backend listens on `http://127.0.0.1:8000`.
 
+The backend bind address and port can also be controlled with:
+
+```powershell
+$env:QUANT_PLATFORM_HOST="127.0.0.1"
+$env:QUANT_PLATFORM_PORT="8000"
+python -m quant_platform.main
+```
+
 ### 2. Start the frontend UI
 
 In a second terminal:
@@ -200,12 +208,69 @@ The frontend runs on `http://127.0.0.1:5173`.
 
 By default it talks to `http://127.0.0.1:8000`.
 
-If you need a different backend URL:
+If you want to keep the backend URL in a frontend env file, create `frontend/.env.local`:
+
+```dotenv
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+There is also an example file at `frontend/.env.example`.
+
+If you prefer to set it only for one shell session:
 
 ```powershell
 $env:VITE_API_BASE_URL="http://127.0.0.1:8000"
 npm run dev
 ```
+
+### WSL + ROCm Path For Radeon RX 7900 XT
+
+If you want the training backend to run in a dedicated Linux ROCm environment while keeping the frontend on Windows, use the WSL path.
+
+High-level flow:
+
+1. install WSL with Ubuntu 22.04 or 24.04
+2. install the AMD WSL driver on Windows
+3. install the Windows SDK on Windows
+4. install the ROCm + ROCDXG WSL stack inside Ubuntu
+5. create the app env inside WSL
+6. install ROCm PyTorch wheels in that env
+7. optionally install LightGBM and Transformers into that env
+8. launch the backend in WSL and the frontend on Windows
+
+Repo helpers:
+
+```powershell
+# From Windows, after Ubuntu WSL is installed
+scripts\start-wsl-rocm.ps1 -Distro Ubuntu-24.04
+```
+
+Inside WSL:
+
+```bash
+./scripts/wsl_rocm/install_rocm_stack.sh
+./scripts/wsl_rocm/setup_app_env.sh
+./scripts/wsl_rocm/install_pytorch_rocm.sh
+./scripts/wsl_rocm/install_optional_ml.sh
+./scripts/wsl_rocm/verify_rocm.sh
+./scripts/wsl_rocm/start_backend.sh
+```
+
+Important notes:
+
+- Use `pip install -e .[dev]` for the app env inside WSL, not `.[dev,ml]`, because the generic `ml` extras would replace ROCm wheels with the wrong torch build.
+- To add optional model libraries after ROCm PyTorch is installed, use `./scripts/wsl_rocm/install_optional_ml.sh` or `pip install -e .[ml-runtime]`. Both paths avoid reinstalling torch.
+- The WSL launcher script starts the backend with `QUANT_PLATFORM_HOST=0.0.0.0` so the Windows frontend can reach it through `http://127.0.0.1:<port>`.
+- The current helper now follows AMD's ROCDXG-based WSL flow. It installs base ROCm userspace packages in WSL, builds `librocdxg`, and exports `HSA_ENABLE_DXG_DETECTION=1` for verification and backend startup.
+- The helper expects a Windows SDK include path visible from WSL, usually `/mnt/c/Program Files (x86)/Windows Kits/10/Include/<version>`. You can override detection with `WIN_SDK_PATH=/mnt/c/.../Include/<version>`.
+- On this machine today, WSL only has `docker-desktop` registered, so you still need to install a real Ubuntu distro before the ROCm launcher will work.
+
+Official references:
+
+- Microsoft WSL install guide: https://learn.microsoft.com/en-us/windows/wsl/install
+- AMD WSL ROCm guide (current ROCDXG path): https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/wsl/howto_wsl.html
+- AMD WSL ROCm guide (legacy package-install reference): https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/wsl/install-radeon.html
+- AMD WSL PyTorch install guide: https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/wsl/install-pytorch.html
 
 ## Using The App
 

@@ -4,6 +4,7 @@ import json
 from uuid import uuid4
 
 from .database import connect, utcnow
+from .research_layers import default_research_layer_rows
 
 
 def _seed_table(connection, table: str, rows: list[dict[str, str]]) -> None:
@@ -16,6 +17,25 @@ def _seed_table(connection, table: str, rows: list[dict[str, str]]) -> None:
         connection.execute(
             f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
             tuple(row.values()),
+        )
+
+
+def _sync_table(connection, table: str, rows: list[dict[str, str]]) -> None:
+    for row in rows:
+        existing = connection.execute(f"SELECT id FROM {table} WHERE id = ?", (row["id"],)).fetchone()
+        if existing is None:
+            columns = ", ".join(row.keys())
+            placeholders = ", ".join("?" for _ in row)
+            connection.execute(
+                f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
+                tuple(row.values()),
+            )
+            continue
+        assignments = ", ".join(f"{column} = ?" for column in row.keys() if column != "id")
+        values = [row[column] for column in row.keys() if column != "id"]
+        connection.execute(
+            f"UPDATE {table} SET {assignments} WHERE id = ?",
+            (*values, row["id"]),
         )
 
 
@@ -117,7 +137,12 @@ def seed_defaults() -> None:
                 },
             ],
         )
-        _seed_table(
+        _sync_table(
+            connection,
+            "research_layers",
+            default_research_layer_rows(now),
+        )
+        _sync_table(
             connection,
             "model_specs",
             [
@@ -159,6 +184,14 @@ def seed_defaults() -> None:
                     "kind": "temporal_cnn",
                     "description": "Local temporal-pattern detector for event response experiments.",
                     "config_json": json.dumps({"task": "regression", "family": "torch"}),
+                    "created_at": now,
+                },
+                {
+                    "id": "spec_layered_decision",
+                    "name": "Layered Decision Stack",
+                    "kind": "layered_decision",
+                    "description": "Multi-layer research stack with specialized submodels and a fusion meta-model.",
+                    "config_json": json.dumps({"task": "regression", "family": "ensemble"}),
                     "created_at": now,
                 },
             ],

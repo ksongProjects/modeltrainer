@@ -10,6 +10,12 @@ import pandas as pd
 
 from ..config import FEATURE_DIR, WAREHOUSE_PATH, ensure_directories
 from .data import load_dataset_frame
+from .text_embeddings import (
+    MACRO_TEXT_EMBEDDING_COLUMNS,
+    TEXT_EMBEDDING_COLUMNS,
+    TextEmbeddingBuildResult,
+    materialize_text_embedding_features,
+)
 
 FEATURE_COLUMNS = [
     "value_z",
@@ -21,6 +27,9 @@ FEATURE_COLUMNS = [
     "composite_score",
     "volume_z",
 ]
+
+TEXT_FEATURE_COLUMNS = [*TEXT_EMBEDDING_COLUMNS, "text_event_count", "text_event_weight"]
+MACRO_TEXT_FEATURE_COLUMNS = [*MACRO_TEXT_EMBEDDING_COLUMNS, "macro_text_event_count", "macro_text_event_weight"]
 
 
 @dataclass
@@ -56,27 +65,44 @@ def materialize_features(
     name: str,
     winsor_limit: float,
     forecast_horizon_days: int,
+    process_step_state: dict[str, bool] | None = None,
 ) -> FeatureBuildResult:
     ensure_directories()
     frame = load_dataset_frame(dataset_version_id).copy()
-    frame["effective_at"] = pd.to_datetime(frame["effective_at"])
+    frame["effective_at"] = pd.to_datetime(frame["effective_at"], utc=True).dt.normalize()
+    frame["known_at"] = pd.to_datetime(frame["known_at"], utc=True)
+    frame["ingested_at"] = pd.to_datetime(frame["ingested_at"], utc=True)
     frame["close"] = frame["close"].astype(float)
     frame["volume"] = frame["volume"].astype(float)
+    process_state = _resolve_feature_process_state(process_step_state)
 
     frame["value_z"] = frame.groupby("effective_at", group_keys=False)["ev_ebitda"].transform(
-        lambda values: -winsorize_series(values, winsor_limit)
+        lambda values: -(
+            winsorize_series(values, winsor_limit)
+            if process_state["winsorize_value_factor"]
+            else zscore_series(values)
+        )
     )
     frame["quality_raw"] = frame["roic"].fillna(frame["roic"].median())
-    frame["quality_sector_z"] = sector_zscore(frame, "quality_raw")
+    if process_state["sector_neutralize_quality"]:
+        frame["quality_sector_z"] = sector_zscore(frame, "quality_raw")
+    else:
+        frame["quality_sector_z"] = frame.groupby("effective_at", group_keys=False)["quality_raw"].transform(zscore_series)
     frame["momentum_raw"] = 0.65 * frame["momentum_20d"] + 0.35 * frame["momentum_60d"]
     frame["momentum_z"] = frame.groupby("effective_at", group_keys=False)["momentum_raw"].transform(zscore_series)
     frame["sentiment_raw"] = 0.35 * frame["sentiment_1d"] + 0.65 * frame["sentiment_5d"]
     frame["sentiment_z"] = frame.groupby("effective_at", group_keys=False)["sentiment_raw"].transform(zscore_series)
-    frame["macro_raw"] = frame["macro_surprise"] - frame.groupby("effective_at")["macro_surprise"].transform("mean")
+    if process_state["demean_macro_surprise"]:
+        frame["macro_raw"] = frame["macro_surprise"] - frame.groupby("effective_at")["macro_surprise"].transform("mean")
+    else:
+        frame["macro_raw"] = frame["macro_surprise"]
     frame["macro_z"] = frame.groupby("effective_at", group_keys=False)["macro_raw"].transform(zscore_series)
     frame["earnings_z"] = frame.groupby("effective_at", group_keys=False)["earnings_signal"].transform(zscore_series)
     frame["volume_z"] = frame.groupby("effective_at", group_keys=False)["volume"].transform(
-        lambda values: winsorize_series(np.log1p(values), winsor_limit)
+        lambda values: winsorize_series(
+            np.log1p(values) if process_state["log_transform_volume"] else values,
+            winsor_limit,
+        )
     )
     frame["missing_flag"] = frame[["roic", "ev_ebitda"]].isna().any(axis=1).astype(int)
     frame["outlier_flag"] = (frame["value_z"].abs() >= winsor_limit).astype(int)
@@ -96,6 +122,30 @@ def materialize_features(
     val_cut = int(len(unique_dates) * 0.85)
     frame.loc[frame["effective_at"].dt.strftime("%Y-%m-%d").isin(unique_dates[train_cut:val_cut]), "split"] = "validation"
     frame.loc[frame["effective_at"].dt.strftime("%Y-%m-%d").isin(unique_dates[val_cut:]), "split"] = "test"
+
+    if process_state["aggregate_text_embeddings"]:
+        text_embedding_result = materialize_text_embedding_features(dataset_version_id, frame)
+    else:
+        zero_features = frame[["ticker", "effective_at"]].copy()
+        for column in [*TEXT_FEATURE_COLUMNS, *MACRO_TEXT_FEATURE_COLUMNS]:
+            zero_features[column] = 0.0
+        text_embedding_result = TextEmbeddingBuildResult(
+            features=zero_features,
+            summary={
+                "rows": int(len(zero_features)),
+                "news_event_rows": 0,
+                "ticker_text_coverage": 0.0,
+                "macro_text_coverage": 0.0,
+                "text_embedding_columns": TEXT_EMBEDDING_COLUMNS,
+                "macro_text_embedding_columns": MACRO_TEXT_EMBEDDING_COLUMNS,
+                "lookback_days": 5,
+                "half_life_days": 2.0,
+            },
+            traces=[],
+        )
+    frame = frame.merge(text_embedding_result.features, on=["ticker", "effective_at"], how="left")
+    for column in [*TEXT_FEATURE_COLUMNS, *MACRO_TEXT_FEATURE_COLUMNS]:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
 
     feature_frame = frame.dropna(subset=["forward_return"]).copy()
     feature_folder = FEATURE_DIR / feature_set_id
@@ -125,6 +175,9 @@ def materialize_features(
                     "sentiment_z": row["sentiment_z"],
                     "macro_z": row["macro_z"],
                     "earnings_z": row["earnings_z"],
+                    "text_embedding_00": row.get(TEXT_EMBEDDING_COLUMNS[0], 0.0),
+                    "macro_text_embedding_00": row.get(MACRO_TEXT_EMBEDDING_COLUMNS[0], 0.0),
+                    "process_step_state": process_state,
                 },
                 "output": {"composite_score": row["composite_score"]},
                 "units": "zscore",
@@ -132,21 +185,42 @@ def materialize_features(
                     "dataset_version_id": dataset_version_id,
                     "feature_set_id": feature_set_id,
                     "transform": name,
+                    "process_step_state": process_state,
                 },
             }
         )
+    traces.extend(text_embedding_result.traces[:4])
 
     summary = {
         "rows": int(len(feature_frame)),
         "feature_columns": FEATURE_COLUMNS,
+        "text_feature_columns": TEXT_FEATURE_COLUMNS,
+        "macro_text_feature_columns": MACRO_TEXT_FEATURE_COLUMNS,
         "forecast_horizon_days": forecast_horizon_days,
         "splits": feature_frame["split"].value_counts().to_dict(),
         "missing_flags": int(feature_frame["missing_flag"].sum()),
         "outlier_flags": int(feature_frame["outlier_flag"].sum()),
+        "text_embedding_summary": text_embedding_result.summary,
+        "process_step_state": process_state,
         "artifacts": {"feature_path": str(feature_path)},
     }
     (feature_folder / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return FeatureBuildResult(feature_path=feature_path, summary=summary, traces=traces)
+
+
+def _resolve_feature_process_state(process_step_state: dict[str, bool] | None) -> dict[str, bool]:
+    state = {
+        "winsorize_value_factor": True,
+        "sector_neutralize_quality": True,
+        "aggregate_text_embeddings": True,
+        "demean_macro_surprise": True,
+        "log_transform_volume": True,
+    }
+    if process_step_state:
+        for key, value in process_step_state.items():
+            if key in state:
+                state[key] = bool(value)
+    return state
 
 
 def _register_feature_set(feature_set_id: str, feature_path: Path) -> None:

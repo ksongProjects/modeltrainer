@@ -74,6 +74,26 @@ TIMESTAMP_COLUMNS = [
     "ingested_at",
 ]
 
+REQUIRED_NEWS_EVENT_COLUMNS = [
+    "event_id",
+    "event_scope",
+    "event_type",
+    "published_at",
+    "known_at",
+    "source",
+    "source_weight",
+    "entity_confidence",
+    "novelty_score",
+    "headline",
+    "body",
+]
+
+OPTIONAL_NEWS_EVENT_COLUMNS = [
+    "entity_id",
+    "ticker",
+    "sector",
+]
+
 
 @dataclass
 class DatasetBuildResult:
@@ -97,6 +117,7 @@ def build_synthetic_dataset(
     macro_rate = 4.75 + np.sin(np.linspace(0, 6.28, len(dates))) * 0.4
     macro_surprise = rng.normal(0, 0.15, size=len(dates))
     records: list[dict[str, object]] = []
+    news_events: list[dict[str, object]] = []
 
     for ticker_index in range(num_tickers):
         ticker = f"Q{ticker_index:03d}"
@@ -138,6 +159,8 @@ def build_synthetic_dataset(
         event_intensity = pd.Series(earnings_signal, index=dates).rolling(3).sum().fillna(0.0)
 
         for i, current_date in enumerate(dates):
+            shock = float(news_shock[i])
+            earnings_value = float(event_intensity.iloc[i])
             records.append(
                 {
                     "entity_id": entity_id,
@@ -160,17 +183,77 @@ def build_synthetic_dataset(
                     "sentiment_5d": float(sentiment_5d.iloc[i]),
                     "macro_rate": float(macro_rate[i]),
                     "macro_surprise": float(macro_surprise[i]),
-                    "earnings_signal": float(event_intensity.iloc[i]),
+                    "earnings_signal": earnings_value,
+                }
+            )
+            if abs(shock) > 0.012 or abs(earnings_value) > 0.02 or rng.random() < 0.12:
+                sentiment_label = "bullish" if shock >= 0 else "bearish"
+                event_type = "earnings" if abs(earnings_value) > 0.02 else "company_news"
+                headline = (
+                    f"{ticker} {event_type.replace('_', ' ')} drives {sentiment_label} tone in {sector.lower()}"
+                )
+                body = (
+                    f"{ticker} reported {event_type.replace('_', ' ')} developments with "
+                    f"{'stronger' if shock >= 0 else 'weaker'} demand signals, "
+                    f"management commentary, and margin expectations."
+                )
+                published_at = current_date + pd.Timedelta(hours=9, minutes=15) + pd.Timedelta(minutes=int(rng.integers(0, 360)))
+                known_at = published_at + pd.Timedelta(minutes=int(rng.integers(2, 35)))
+                news_events.append(
+                    {
+                        "event_id": f"{dataset_id}_{ticker}_{i:04d}",
+                        "entity_id": entity_id,
+                        "ticker": ticker,
+                        "sector": sector,
+                        "event_scope": "ticker",
+                        "event_type": event_type,
+                        "published_at": published_at.isoformat(),
+                        "known_at": known_at.isoformat(),
+                        "source": "synthetic_newswire",
+                        "source_weight": float(1.0 + min(abs(shock) * 10, 1.0)),
+                        "entity_confidence": float(np.clip(0.75 + abs(shock) * 4, 0.75, 0.98)),
+                        "novelty_score": float(np.clip(0.45 + abs(shock) * 6, 0.45, 0.99)),
+                        "headline": headline,
+                        "body": body,
+                    }
+                )
+
+    macro_topics = ["inflation", "rates", "employment", "growth", "oil", "credit"]
+    for i, current_date in enumerate(dates):
+        if abs(float(macro_surprise[i])) > 0.06 or rng.random() < 0.16:
+            topic = macro_topics[i % len(macro_topics)]
+            direction = "cooling" if float(macro_surprise[i]) < 0 else "heating"
+            published_at = current_date + pd.Timedelta(hours=7, minutes=30) + pd.Timedelta(minutes=int(rng.integers(0, 180)))
+            known_at = published_at + pd.Timedelta(minutes=int(rng.integers(1, 25)))
+            news_events.append(
+                {
+                    "event_id": f"{dataset_id}_macro_{i:04d}",
+                    "entity_id": None,
+                    "ticker": None,
+                    "sector": "Macro",
+                    "event_scope": "macro",
+                    "event_type": f"macro_{topic}",
+                    "published_at": published_at.isoformat(),
+                    "known_at": known_at.isoformat(),
+                    "source": "synthetic_macro_desk",
+                    "source_weight": float(1.0 + min(abs(float(macro_surprise[i])) * 8, 1.2)),
+                    "entity_confidence": float(np.clip(0.8 + abs(float(macro_surprise[i])) * 2, 0.8, 0.99)),
+                    "novelty_score": float(np.clip(0.5 + abs(float(macro_surprise[i])) * 4, 0.5, 0.99)),
+                    "headline": f"Macro {topic} update points to {direction} conditions",
+                    "body": f"Economic desks observed {direction} {topic} conditions with spillover expectations for broad risk assets.",
                 }
             )
 
     frame = pd.DataFrame(records).sort_values(["effective_at", "ticker"]).reset_index(drop=True)
+    news_frame = pd.DataFrame(news_events).sort_values(["known_at", "event_scope", "ticker"], na_position="last").reset_index(drop=True)
     dataset_folder = DATASET_DIR / dataset_id
     dataset_folder.mkdir(parents=True, exist_ok=True)
     raw_path = RAW_DATA_DIR / f"{dataset_id}_raw.csv"
     pit_path = dataset_folder / "pit_daily.parquet"
+    news_events_path = dataset_folder / "news_events.parquet"
     frame.to_csv(raw_path, index=False)
     frame.to_parquet(pit_path, index=False)
+    news_frame.to_parquet(news_events_path, index=False)
     _register_dataset_in_warehouse(dataset_id, pit_path)
     summary = {
         "rows": int(len(frame)),
@@ -183,9 +266,17 @@ def build_synthetic_dataset(
             "optional_columns_present": OPTIONAL_PARQUET_COLUMNS,
             "extra_columns": [],
         },
+        "news_events": {
+            "rows": int(len(news_frame)),
+            "ticker_news_rows": int((news_frame["event_scope"] == "ticker").sum()),
+            "macro_news_rows": int((news_frame["event_scope"] == "macro").sum()),
+            "required_columns": REQUIRED_NEWS_EVENT_COLUMNS,
+            "optional_columns_present": OPTIONAL_NEWS_EVENT_COLUMNS,
+        },
         "artifacts": {
             "raw_path": str(raw_path),
             "pit_path": str(pit_path),
+            "news_events_path": str(news_events_path),
         },
     }
     (dataset_folder / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -219,6 +310,7 @@ def import_parquet_dataset(
     pit_path = dataset_folder / "pit_daily.parquet"
     pq.write_table(table, pit_path)
     _register_dataset_in_warehouse(dataset_id, pit_path)
+    news_events_summary = _import_optional_news_events(resolved_source, dataset_folder)
 
     source_manifest_path = dataset_folder / "source_manifest.json"
     source_manifest = {
@@ -226,10 +318,11 @@ def import_parquet_dataset(
         "source_kind": "parquet_file" if resolved_source.is_file() else "parquet_directory",
         "imported_at": pd.Timestamp.now("UTC").isoformat(),
         "dataset_name": name or resolved_source.stem,
+        "news_events_source_path": news_events_summary.get("source_path") if news_events_summary else None,
     }
     source_manifest_path.write_text(json.dumps(source_manifest, indent=2), encoding="utf-8")
 
-    summary = _build_import_summary(table, pit_path, resolved_source, source_manifest_path)
+    summary = _build_import_summary(table, pit_path, resolved_source, source_manifest_path, news_events_summary)
     (dataset_folder / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return DatasetBuildResult(pit_path=pit_path, raw_path=None, summary=summary)
 
@@ -251,6 +344,13 @@ def _register_dataset_in_warehouse(dataset_id: str, pit_path: Path) -> None:
 def load_dataset_frame(dataset_id: str) -> pd.DataFrame:
     pit_path = DATASET_DIR / dataset_id / "pit_daily.parquet"
     return pd.read_parquet(pit_path)
+
+
+def load_news_event_frame(dataset_id: str) -> pd.DataFrame:
+    news_events_path = DATASET_DIR / dataset_id / "news_events.parquet"
+    if not news_events_path.exists():
+        return pd.DataFrame(columns=[*REQUIRED_NEWS_EVENT_COLUMNS, *OPTIONAL_NEWS_EVENT_COLUMNS])
+    return pd.read_parquet(news_events_path)
 
 
 def _open_parquet_dataset(source_path: Path) -> ds.Dataset:
@@ -285,11 +385,63 @@ def _validate_import_table(table: Any) -> None:
         raise ValueError("Column sector contains empty values in the sample window.")
 
 
+def _import_optional_news_events(source_path: Path, dataset_folder: Path) -> dict[str, object] | None:
+    news_source = _resolve_news_events_source(source_path)
+    if news_source is None:
+        return None
+
+    dataset = _open_parquet_dataset(news_source)
+    schema_names = set(dataset.schema.names)
+    missing_columns = [column for column in REQUIRED_NEWS_EVENT_COLUMNS if column not in schema_names]
+    if missing_columns:
+        raise ValueError(
+            "Imported news_events parquet is missing required columns: "
+            + ", ".join(missing_columns)
+        )
+
+    table = dataset.to_table()
+    news_events_path = dataset_folder / "news_events.parquet"
+    pq.write_table(table, news_events_path)
+    event_scope_column = pc.cast(table["event_scope"], "string")
+    return {
+        "rows": int(table.num_rows),
+        "ticker_news_rows": int(pc.sum(pc.equal(event_scope_column, "ticker")).as_py() or 0),
+        "macro_news_rows": int(pc.sum(pc.equal(event_scope_column, "macro")).as_py() or 0),
+        "required_columns": REQUIRED_NEWS_EVENT_COLUMNS,
+        "optional_columns_present": [column for column in OPTIONAL_NEWS_EVENT_COLUMNS if column in table.column_names],
+        "artifacts": {"news_events_path": str(news_events_path)},
+        "source_path": str(news_source),
+    }
+
+
+def _resolve_news_events_source(source_path: Path) -> Path | None:
+    candidates: list[Path] = []
+    if source_path.is_file():
+        candidates.extend(
+            [
+                source_path.parent / "news_events.parquet",
+                source_path.parent / f"{source_path.stem}_news_events.parquet",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                source_path / "news_events.parquet",
+                source_path.parent / "news_events.parquet",
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _build_import_summary(
     table: Any,
     pit_path: Path,
     source_path: Path,
     source_manifest_path: Path,
+    news_events_summary: dict[str, object] | None,
 ) -> dict[str, object]:
     effective_values = pc.cast(table["effective_at"], "timestamp[us]")
     sample_tickers = sorted(pc.unique(pc.cast(table["ticker"], "string")).to_pylist())[:5]
@@ -313,9 +465,11 @@ def _build_import_summary(
                 if column not in REQUIRED_PARQUET_COLUMNS and column not in OPTIONAL_PARQUET_COLUMNS
             ),
         },
+        "news_events": news_events_summary or {"rows": 0},
         "artifacts": {
             "pit_path": str(pit_path),
             "source_path": str(source_path),
             "source_manifest": str(source_manifest_path),
+            **(news_events_summary.get("artifacts", {}) if news_events_summary else {}),
         },
     }

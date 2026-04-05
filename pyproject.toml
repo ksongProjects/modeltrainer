@@ -30,6 +30,10 @@ ml = [
   "torch>=2.4.1",
   "transformers>=4.45.2",
 ]
+ml-runtime = [
+  "lightgbm>=4.5.0",
+  "transformers>=4.45.2",
+]
 
 [project.scripts]
 quant-platform-api = "quant_platform.main:run"

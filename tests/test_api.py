@@ -166,3 +166,23 @@ def test_end_to_end_training_and_testing_flow() -> None:
     assert events
     assert any(metric["name"] == "sharpe" for metric in metrics)
     assert traces
+
+
+def test_runtime_self_check_endpoint_runs_smoke_probe() -> None:
+    response = client.post(
+        "/api/runtime-self-check",
+        json={
+            "compute_target": "cpu",
+            "precision_mode": "fp32",
+            "batch_size": 16,
+            "sequence_length": 12,
+            "gradient_clip_norm": 1.0,
+            "model_kind": "pytorch_mlp",
+            "input_dim": 8,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["resolved_runtime"]["resolved_compute_target"] == "cpu"
+    assert "tensor_allocation" in payload["checks"]
+    assert "elapsed_ms" in payload["metrics"]

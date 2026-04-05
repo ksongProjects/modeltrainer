@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { api } from "./api";
+import { DashboardLayout } from "./DashboardLayout";
 import type { JsonRecord, OverviewResponse } from "./types";
 
 const tabs = [
+  "Master Control",
   "Data Pipeline",
   "Factor Lab",
   "Training Studio",
@@ -32,6 +34,11 @@ function StatusPill({ value }: { value: string }) {
       : ["failed", "rejected", "stopped"].includes(value)
         ? "bad"
         : "info";
+  return <span className={`status-pill tone-${tone}`}>{value}</span>;
+}
+
+function RequirementPill({ value }: { value: string }) {
+  const tone = value === "required" ? "bad" : value === "conditional" ? "info" : "muted";
   return <span className={`status-pill tone-${tone}`}>{value}</span>;
 }
 
@@ -361,6 +368,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(tabs[0]);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [catalog, setCatalog] = useState<JsonRecord | null>(null);
+  const [runtimeCapabilities, setRuntimeCapabilities] = useState<JsonRecord | null>(null);
   const [datasets, setDatasets] = useState<JsonRecord[]>([]);
   const [features, setFeatures] = useState<JsonRecord[]>([]);
   const [models, setModels] = useState<JsonRecord[]>([]);
@@ -380,6 +388,7 @@ export default function App() {
   const [savedDatasetTags, setSavedDatasetTags] = useState<JsonRecord[]>([]);
   const [newSavedTagName, setNewSavedTagName] = useState("");
   const [featureDatasetId, setFeatureDatasetId] = useState("");
+  const [selectedLayerId, setSelectedLayerId] = useState("");
   const [trainingForm, setTrainingForm] = useState({
     name: "Master Control Training",
     dataset_version_id: "",
@@ -389,7 +398,12 @@ export default function App() {
     learning_rate: "0.02",
     hidden_dim: "64",
     checkpoint_frequency: "1",
-    horizon_days: "5"
+    horizon_days: "5",
+    compute_target: "auto",
+    precision_mode: "auto",
+    batch_size: "128",
+    sequence_length: "24",
+    gradient_clip_norm: "1.0"
   });
   const [testingForm, setTestingForm] = useState({
     name: "Out-of-Sample Backtest",
@@ -399,14 +413,26 @@ export default function App() {
     rebalance_decile: "0.10",
     stress_iterations: "300"
   });
+  const [runtimeSelfCheckForm, setRuntimeSelfCheckForm] = useState({
+    compute_target: "auto",
+    precision_mode: "auto",
+    batch_size: "32",
+    sequence_length: "20",
+    gradient_clip_norm: "1.0",
+    model_kind: "pytorch_mlp",
+    input_dim: "8"
+  });
+  const [runtimeSelfCheckResult, setRuntimeSelfCheckResult] = useState<JsonRecord | null>(null);
+  const [runtimeSelfCheckRunning, setRuntimeSelfCheckRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     try {
-      const [overviewData, catalogData, datasetData, featureData, modelData, trainingData, testingData, monitoringData, savedTagData] =
+      const [overviewData, catalogData, runtimeData, datasetData, featureData, modelData, trainingData, testingData, monitoringData, savedTagData] =
         await Promise.all([
           api.get<OverviewResponse>("/api/overview"),
           api.get<JsonRecord>("/api/catalog"),
+          api.get<JsonRecord>("/api/runtime-capabilities"),
           api.get<JsonRecord[]>("/api/datasets"),
           api.get<JsonRecord[]>("/api/features"),
           api.get<JsonRecord[]>("/api/model-versions"),
@@ -417,6 +443,7 @@ export default function App() {
         ]);
       setOverview(overviewData);
       setCatalog(catalogData);
+      setRuntimeCapabilities(runtimeData);
       setDatasets(datasetData);
       setFeatures(featureData);
       setModels(modelData);
@@ -469,6 +496,7 @@ export default function App() {
   }, [selectedRun]);
 
   const modelSpecs = useMemo(() => ((catalog?.model_specs ?? []) as JsonRecord[]), [catalog]);
+  const researchLayers = useMemo(() => ((catalog?.research_layers ?? []) as JsonRecord[]), [catalog]);
   const importTags = useMemo(() => normalizeTagList([...selectedImportTags, ...splitTagInput(importTagText)]), [importTagText, selectedImportTags]);
 
   useEffect(() => {
@@ -479,6 +507,10 @@ export default function App() {
     const availableTags = new Set(savedDatasetTags.map((tag) => String(tag.name)));
     setSelectedImportTags((current) => current.filter((tag) => availableTags.has(tag)));
   }, [savedDatasetTags]);
+
+  useEffect(() => {
+    setSelectedLayerId((current) => (current && researchLayers.some((layer) => layer.id === current) ? current : String(researchLayers[0]?.id ?? "")));
+  }, [researchLayers]);
 
   useEffect(() => {
     setTrainingForm((current) => ({
@@ -512,12 +544,31 @@ export default function App() {
     }));
   }, [features, models]);
 
+  useEffect(() => {
+    setRuntimeSelfCheckForm((current) => ({
+      ...current,
+      compute_target:
+        current.compute_target && Array.isArray(runtimeCapabilities?.supported_compute_targets) && (runtimeCapabilities.supported_compute_targets as string[]).includes(current.compute_target)
+          ? current.compute_target
+          : String(runtimeCapabilities?.recommended_compute_target ?? "auto"),
+      precision_mode:
+        current.precision_mode && Array.isArray(runtimeCapabilities?.supported_precision_modes) && (runtimeCapabilities.supported_precision_modes as string[]).includes(current.precision_mode)
+          ? current.precision_mode
+          : "auto"
+    }));
+  }, [runtimeCapabilities]);
+
   const selectedRunData = useMemo(() => {
     if (!selectedRun) return null;
     return selectedRun.kind === "training"
       ? trainingRuns.find((run) => run.id === selectedRun.id) ?? null
       : testingRuns.find((run) => run.id === selectedRun.id) ?? null;
   }, [selectedRun, testingRuns, trainingRuns]);
+
+  const selectedResearchLayer = useMemo(
+    () => researchLayers.find((layer) => String(layer.id) === selectedLayerId) ?? null,
+    [researchLayers, selectedLayerId]
+  );
 
   async function createDataset() {
     await api.post("/api/datasets", {});
@@ -577,6 +628,13 @@ export default function App() {
       hidden_dim: parseNumber(trainingForm.hidden_dim, 64),
       checkpoint_frequency: parseNumber(trainingForm.checkpoint_frequency, 1),
       horizon_days: parseNumber(trainingForm.horizon_days, 5),
+      runtime_settings: {
+        compute_target: trainingForm.compute_target,
+        precision_mode: trainingForm.precision_mode,
+        batch_size: parseNumber(trainingForm.batch_size, 128),
+        sequence_length: parseNumber(trainingForm.sequence_length, 24),
+        gradient_clip_norm: parseNumber(trainingForm.gradient_clip_norm, 1.0)
+      },
       ...(trainingForm.dataset_version_id ? { dataset_version_id: trainingForm.dataset_version_id } : {}),
       ...(trainingForm.feature_set_version_id ? { feature_set_version_id: trainingForm.feature_set_version_id } : {})
     });
@@ -618,6 +676,65 @@ export default function App() {
   async function updateModelStatus(modelId: string, action: "promote" | "reject") {
     await api.post(`/api/model-versions/${modelId}/${action}`);
     refresh();
+  }
+
+  async function updateLayerControls(layerId: string, updates: JsonRecord) {
+    await api.post(`/api/research-layers/${layerId}/controls`, updates);
+    await refresh();
+  }
+
+  async function setPreferredLayerModel(layerId: string, modelKind: string) {
+    await updateLayerControls(layerId, { preferred_model_kind: modelKind });
+  }
+
+  async function toggleLayerCandidate(layerId: string, modelKind: string) {
+    const layer = researchLayers.find((item) => String(item.id) === layerId);
+    if (!layer) return;
+    const current = Array.isArray(layer.control_state?.candidate_model_kinds)
+      ? layer.control_state.candidate_model_kinds.map((value: unknown) => String(value))
+      : [];
+    const next = current.includes(modelKind)
+      ? current.filter((value: string) => value !== modelKind)
+      : [...current, modelKind];
+    await updateLayerControls(layerId, { candidate_model_kinds: next });
+  }
+
+  async function toggleLayerProcessStep(layerId: string, stepId: string) {
+    const layer = researchLayers.find((item) => String(item.id) === layerId);
+    if (!layer) return;
+    const current = typeof layer.control_state?.process_step_state === "object" && layer.control_state?.process_step_state
+      ? { ...layer.control_state.process_step_state }
+      : {};
+    current[stepId] = !current[stepId];
+    await updateLayerControls(layerId, { process_step_state: current });
+  }
+
+  async function updateLayerRuntimeSetting(layerId: string, key: string, value: string | number) {
+    const layer = researchLayers.find((item) => String(item.id) === layerId);
+    if (!layer) return;
+    const current = typeof layer.control_state?.runtime_settings === "object" && layer.control_state?.runtime_settings
+      ? { ...layer.control_state.runtime_settings }
+      : {};
+    current[key] = value;
+    await updateLayerControls(layerId, { runtime_settings: current });
+  }
+
+  async function runRuntimeSelfCheck() {
+    setRuntimeSelfCheckRunning(true);
+    try {
+      const payload = await api.post<JsonRecord>("/api/runtime-self-check", {
+        compute_target: runtimeSelfCheckForm.compute_target,
+        precision_mode: runtimeSelfCheckForm.precision_mode,
+        batch_size: parseNumber(runtimeSelfCheckForm.batch_size, 32),
+        sequence_length: parseNumber(runtimeSelfCheckForm.sequence_length, 20),
+        gradient_clip_norm: parseNumber(runtimeSelfCheckForm.gradient_clip_norm, 1.0),
+        model_kind: runtimeSelfCheckForm.model_kind,
+        input_dim: parseNumber(runtimeSelfCheckForm.input_dim, 8)
+      });
+      setRuntimeSelfCheckResult(payload);
+    } finally {
+      setRuntimeSelfCheckRunning(false);
+    }
   }
 
   const latestDataset = datasets[0] ?? null;
@@ -663,6 +780,14 @@ export default function App() {
       sortValue: (dataset) => String(dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? ""),
       filterValue: (dataset) => String(dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? ""),
       render: (dataset) => dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? "generated locally"
+    },
+    {
+      key: "news_rows",
+      label: "News Events",
+      className: "mono-cell",
+      sortable: true,
+      sortValue: (dataset) => Number(dataset.summary?.news_events?.rows ?? 0),
+      render: (dataset) => pretty(dataset.summary?.news_events?.rows ?? 0)
     }
   ];
 
@@ -670,7 +795,23 @@ export default function App() {
     { key: "name", label: "Name", className: "cell-wide", pin: "left", sortable: true, sortValue: (feature) => String(feature.name ?? ""), filterValue: (feature) => `${feature.name ?? ""} ${feature.id ?? ""}`, render: (feature) => <strong>{feature.name}</strong> },
     { key: "id", label: "ID", className: "mono-cell", sortable: true, sortValue: (feature) => String(feature.id ?? ""), render: (feature) => shortId(feature.id) },
     { key: "dataset", label: "Dataset", className: "mono-cell", sortable: true, sortValue: (feature) => String(feature.dataset_version_id ?? ""), render: (feature) => shortId(feature.dataset_version_id) },
-    { key: "rows", label: "Rows", className: "mono-cell", sortable: true, sortValue: (feature) => Number(feature.summary?.rows ?? 0), render: (feature) => pretty(feature.summary?.rows) }
+    { key: "rows", label: "Rows", className: "mono-cell", sortable: true, sortValue: (feature) => Number(feature.summary?.rows ?? 0), render: (feature) => pretty(feature.summary?.rows) },
+    {
+      key: "ticker_text_coverage",
+      label: "Ticker Text Cov",
+      className: "mono-cell",
+      sortable: true,
+      sortValue: (feature) => Number(feature.summary?.text_embedding_summary?.ticker_text_coverage ?? 0),
+      render: (feature) => pretty(feature.summary?.text_embedding_summary?.ticker_text_coverage ?? 0)
+    },
+    {
+      key: "macro_text_coverage",
+      label: "Macro Text Cov",
+      className: "mono-cell",
+      sortable: true,
+      sortValue: (feature) => Number(feature.summary?.text_embedding_summary?.macro_text_coverage ?? 0),
+      render: (feature) => pretty(feature.summary?.text_embedding_summary?.macro_text_coverage ?? 0)
+    }
   ];
 
   const factorColumns: DenseColumn<JsonRecord>[] = [
@@ -760,11 +901,347 @@ export default function App() {
     { key: "path", label: "Path", className: "mono-cell cell-wide", sortable: true, sortValue: (artifact) => String(artifact.path ?? ""), render: (artifact) => pretty(artifact.path) }
   ];
 
+  const researchLayerColumns: DenseColumn<JsonRecord>[] = [
+    { key: "name", label: "Layer", className: "cell-wide", pin: "left", sortable: true, sortValue: (layer) => String(layer.name ?? ""), filterValue: (layer) => `${layer.name ?? ""} ${layer.id ?? ""} ${layer.stage ?? ""}`, render: (layer) => <strong>{layer.name}</strong> },
+    { key: "stage", label: "Stage", className: "mono-cell", sortable: true, sortValue: (layer) => String(layer.stage ?? ""), render: (layer) => pretty(layer.stage) },
+    { key: "status", label: "Status", sortable: true, sortValue: (layer) => String(layer.status ?? ""), render: (layer) => <StatusPill value={String(layer.status)} /> },
+    { key: "selected_model", label: "Selected Model", className: "mono-cell", sortable: true, sortValue: (layer) => String(layer.control_state?.preferred_model_kind ?? ""), render: (layer) => pretty(layer.control_state?.preferred_model_kind ?? "n/a") },
+    { key: "compute_target", label: "Compute", className: "mono-cell", sortable: true, sortValue: (layer) => String(layer.control_state?.runtime_settings?.compute_target ?? ""), render: (layer) => pretty(layer.control_state?.runtime_settings?.compute_target ?? "auto") },
+    { key: "latest_status", label: "Latest Run", className: "mono-cell", sortable: true, sortValue: (layer) => String(layer.latest_observability?.latest_status ?? ""), render: (layer) => pretty(layer.latest_observability?.latest_status) }
+  ];
+
   function renderMainPanel() {
     switch (activeTab) {
+      case "Master Control": {
+        const layer = selectedResearchLayer;
+        const layerCandidates = Array.isArray(layer?.model_catalog?.candidates) ? (layer.model_catalog.candidates as JsonRecord[]) : [];
+        const layerSteps = Array.isArray(layer?.process_steps) ? (layer.process_steps as JsonRecord[]) : [];
+        const runtimeCatalog = (layer?.runtime_catalog ?? {}) as JsonRecord;
+        const layerRuntimeSettings = (layer?.control_state?.runtime_settings ?? {}) as JsonRecord;
+        const layerInputs = Array.isArray(layer?.data_contract?.input_columns)
+          ? layer.data_contract.input_columns
+          : Array.isArray(layer?.data_contract?.required_columns)
+            ? layer.data_contract.required_columns
+            : [];
+        const layerOutputs = Array.isArray(layer?.data_contract?.prediction_columns)
+          ? layer.data_contract.prediction_columns
+          : Array.isArray(layer?.data_contract?.output_columns)
+            ? layer.data_contract.output_columns
+            : Array.isArray(layer?.data_contract?.target_output_columns)
+              ? layer.data_contract.target_output_columns
+              : [];
+
+        return (
+          <DashboardLayout
+            layoutKey="master-control"
+            defaultRows={[
+              ["research-layers", "selected-layer"],
+              ["candidate-models", "runtime-control"],
+              ["process-controls"]
+            ]}
+            panels={[
+              { id: "research-layers", label: "Research Layers" },
+              { id: "selected-layer", label: "Layer Detail" },
+              { id: "candidate-models", label: "Candidate Models" },
+              { id: "runtime-control", label: "Device And Efficiency" },
+              { id: "process-controls", label: "Preprocessing And Formulas" }
+            ]}
+          >
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Layer Governance</span>
+                  <h2>Research Layers</h2>
+                </div>
+              </div>
+              <p className="panel-copy">
+                Pick a layer to inspect its input contract, model candidates, comparison policy, required preprocessing,
+                and optional steps you can enable or disable from the control center.
+              </p>
+              <DenseTable
+                columns={researchLayerColumns}
+                rows={researchLayers}
+                rowKey={(layerRow) => String(layerRow.id)}
+                emptyTitle="No research layers"
+                emptyBody="Seeded research layers will appear here once the control plane initializes."
+                onRowClick={(layerRow) => setSelectedLayerId(String(layerRow.id))}
+                selectedRowId={selectedLayerId}
+                filterPlaceholder="Filter layers by name, id, or stage"
+                defaultSort={{ key: "stage", direction: "asc" }}
+              />
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Selected Layer</span>
+                  <h2>{layer?.name ?? "Layer Detail"}</h2>
+                </div>
+                {layer?.status ? <StatusPill value={String(layer.status)} /> : null}
+              </div>
+              {!layer ? (
+                <EmptyState title="No layer selected" body="Choose a research layer from the table to inspect its contracts and controls." />
+              ) : (
+                <>
+                  <p className="panel-copy">{layer.description}</p>
+                  <div className="metric-grid compact">
+                    <MetricCard label="Selected Model" value={layer.control_state?.preferred_model_kind ?? "n/a"} />
+                    <MetricCard label="Comparison Metric" value={layer.control_state?.selection_metric ?? "n/a"} />
+                    <MetricCard label="Enabled Steps" value={layerSteps.filter((step) => step.enabled).length} />
+                    <MetricCard label="Latest Status" value={layer.latest_observability?.latest_status ?? "n/a"} />
+                    <MetricCard label="Compute Target" value={layer.control_state?.runtime_settings?.compute_target ?? "n/a"} />
+                    <MetricCard label="Precision" value={layer.control_state?.runtime_settings?.precision_mode ?? "n/a"} />
+                  </div>
+                  <div className="contract-grid">
+                    <article className="contract-card">
+                      <small>Input Kind</small>
+                      <strong>{pretty(layer.data_contract?.input_kind ?? "n/a")}</strong>
+                      <p>{compactText(layerInputs.join(", ") || "No explicit input column contract published.", 180)}</p>
+                    </article>
+                    <article className="contract-card">
+                      <small>Output Kind</small>
+                      <strong>{pretty(layer.data_contract?.output_kind ?? layer.data_contract?.prediction_columns?.[0] ?? "n/a")}</strong>
+                      <p>{compactText(layerOutputs.join(", ") || "No explicit output column contract published.", 180)}</p>
+                    </article>
+                    <article className="contract-card">
+                      <small>Latest Metrics</small>
+                      <strong>{Object.keys(layer.latest_observability?.latest_metrics ?? {}).length}</strong>
+                      <p>{compactText(layer.latest_observability?.latest_metrics, 180)}</p>
+                    </article>
+                    <article className="contract-card">
+                      <small>Runtime</small>
+                      <strong>{pretty(layer.control_state?.runtime_settings?.compute_target ?? "auto")}</strong>
+                      <p>{compactText(layer.latest_comparison?.runtime_summary ?? layer.control_state?.runtime_settings ?? {}, 180)}</p>
+                    </article>
+                  </div>
+                  {layer.latest_comparison ? (
+                    <div className="comparison-block">
+                      <div className="comparison-head">
+                        <span>Latest Comparison</span>
+                        <strong>{pretty(layer.latest_comparison?.selected_model_kind)}</strong>
+                      </div>
+                      <pre className="json-block compact-json">{JSON.stringify(layer.latest_comparison, null, 2)}</pre>
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Model Selection</span>
+                  <h2>Candidate Models</h2>
+                </div>
+              </div>
+              {!layer ? (
+                <EmptyState title="No layer selected" body="Select a layer to manage its candidate models and preferred model family." />
+              ) : !layerCandidates.length ? (
+                <EmptyState title="No candidate models" body="This layer is algorithmic or procedural rather than trainable." />
+              ) : (
+                <div className="control-list">
+                  {layerCandidates.map((candidate) => (
+                    <article key={String(candidate.kind)} className="control-card">
+                      <div className="control-card-head">
+                        <div>
+                          <strong>{candidate.label}</strong>
+                          <span>{candidate.kind}</span>
+                        </div>
+                        {candidate.recommended ? <StatusPill value="recommended" /> : null}
+                      </div>
+                      <p>{candidate.rationale}</p>
+                      <div className="pill-row">
+                        <StatusPill value={String(candidate.implementation_mode)} />
+                        <StatusPill value={String(candidate.input_fit)} />
+                        <StatusPill value={`devices:${(candidate.acceleration_modes ?? []).join("/") || "cpu"}`} />
+                        {candidate.selected ? <StatusPill value="selected" /> : null}
+                      </div>
+                      <div className="inline-controls wrap">
+                        <button
+                          onClick={() => setPreferredLayerModel(String(layer.id), String(candidate.kind))}
+                          disabled={candidate.selected}
+                        >
+                          {candidate.selected ? "Preferred" : "Use As Preferred"}
+                        </button>
+                        <button
+                          className={candidate.enabled_for_comparison ? "ghost is-active-toggle" : "ghost"}
+                          onClick={() => toggleLayerCandidate(String(layer.id), String(candidate.kind))}
+                        >
+                          {candidate.enabled_for_comparison ? "Included In Compare" : "Add To Compare"}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Runtime Control</span>
+                  <h2>Device And Efficiency</h2>
+                </div>
+              </div>
+              {!layer ? (
+                <EmptyState title="No layer selected" body="Select a trainable layer to choose device, precision, batch size, and sequence length." />
+              ) : !Object.keys(runtimeCatalog).length ? (
+                <EmptyState title="No runtime controls" body="This layer is not trainable, so there is no device or runtime configuration to manage." />
+              ) : (
+                <>
+                  <p className="panel-copy">
+                    Pick the preferred compute target for this layer and tune the runtime budget. Torch-backed models can
+                    use GPU acceleration when the local runtime exposes CUDA/ROCm or DirectML.
+                  </p>
+                  <div className="metric-grid compact">
+                    <MetricCard label="Recommended Target" value={runtimeCapabilities?.recommended_compute_target ?? "cpu"} />
+                    <MetricCard label="Detected Devices" value={Array.isArray(runtimeCapabilities?.devices) ? runtimeCapabilities?.devices.length : 0} />
+                    <MetricCard label="Batch Size" value={layerRuntimeSettings.batch_size ?? "n/a"} />
+                    <MetricCard label="Seq Length" value={runtimeCatalog.supports_sequence_length ? (layerRuntimeSettings.sequence_length ?? "n/a") : "n/a"} />
+                  </div>
+                  <div className="control-form two-column">
+                    <label>
+                      <span>Compute Target</span>
+                      <select
+                        value={String(layerRuntimeSettings.compute_target ?? "auto")}
+                        onChange={(event) => updateLayerRuntimeSetting(String(layer.id), "compute_target", event.target.value)}
+                      >
+                        {Array.isArray(runtimeCatalog.supported_compute_targets)
+                          ? runtimeCatalog.supported_compute_targets.map((target) => (
+                              <option key={String(target)} value={String(target)}>
+                                {String(target)}
+                              </option>
+                            ))
+                          : null}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Precision</span>
+                      <select
+                        value={String(layerRuntimeSettings.precision_mode ?? "auto")}
+                        onChange={(event) => updateLayerRuntimeSetting(String(layer.id), "precision_mode", event.target.value)}
+                      >
+                        {Array.isArray(runtimeCatalog.supported_precision_modes)
+                          ? runtimeCatalog.supported_precision_modes.map((mode) => (
+                              <option key={String(mode)} value={String(mode)}>
+                                {String(mode)}
+                              </option>
+                            ))
+                          : null}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Batch Size</span>
+                      <input
+                        value={String(layerRuntimeSettings.batch_size ?? "")}
+                        onChange={(event) => updateLayerRuntimeSetting(String(layer.id), "batch_size", parseNumber(event.target.value, 128))}
+                      />
+                    </label>
+                    <label>
+                      <span>Grad Clip</span>
+                      <input
+                        value={String(layerRuntimeSettings.gradient_clip_norm ?? "")}
+                        onChange={(event) => updateLayerRuntimeSetting(String(layer.id), "gradient_clip_norm", parseNumber(event.target.value, 1.0))}
+                      />
+                    </label>
+                    {runtimeCatalog.supports_sequence_length ? (
+                      <label>
+                        <span>Sequence Length</span>
+                        <input
+                          value={String(layerRuntimeSettings.sequence_length ?? "")}
+                          onChange={(event) => updateLayerRuntimeSetting(String(layer.id), "sequence_length", parseNumber(event.target.value, 24))}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  {Array.isArray(runtimeCapabilities?.devices) ? (
+                    <div className="control-list">
+                      {(runtimeCapabilities.devices as JsonRecord[]).map((device, index) => (
+                        <article key={`${device.kind}-${index}`} className="control-card">
+                          <div className="control-card-head">
+                            <div>
+                              <strong>{device.label ?? device.kind}</strong>
+                              <span>{device.kind}</span>
+                            </div>
+                            <StatusPill value={String(device.backend ?? device.provider ?? "runtime")} />
+                          </div>
+                          <p>{compactText(device, 180)}</p>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                </>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Process Controls</span>
+                  <h2>Preprocessing And Formulas</h2>
+                </div>
+              </div>
+              {!layer ? (
+                <EmptyState title="No layer selected" body="Select a layer to inspect formulas, algorithms, and optional process steps." />
+              ) : (
+                <div className="control-list">
+                  {layerSteps.map((step) => (
+                    <article key={String(step.id)} className="control-card">
+                      <div className="control-card-head">
+                        <div>
+                          <strong>{step.name}</strong>
+                          <span>{step.id}</span>
+                        </div>
+                        <RequirementPill value={String(step.requirement_level)} />
+                      </div>
+                      <p>{step.algorithm}</p>
+                      <div className="formula-block">
+                        <small>Formula</small>
+                        <code>{step.formula}</code>
+                      </div>
+                      <div className="contract-grid compact-contract-grid">
+                        <article className="contract-card compact-contract">
+                          <small>Inputs</small>
+                          <p>{compactText(pretty(step.inputs), 160)}</p>
+                        </article>
+                        <article className="contract-card compact-contract">
+                          <small>Outputs</small>
+                          <p>{compactText(pretty(step.outputs), 160)}</p>
+                        </article>
+                      </div>
+                      <p className="control-note">{step.validity_reason}</p>
+                      <div className="inline-controls wrap">
+                        <StatusPill value={step.enabled ? "enabled" : "disabled"} />
+                        <button
+                          className="ghost"
+                          disabled={!step.can_disable}
+                          onClick={() => toggleLayerProcessStep(String(layer.id), String(step.id))}
+                        >
+                          {step.can_disable ? (step.enabled ? "Disable Step" : "Enable Step") : "Locked"}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </DashboardLayout>
+        );
+      }
       case "Data Pipeline":
         return (
-          <div className="panel-grid">
+          <DashboardLayout
+            layoutKey="data-pipeline"
+            defaultRows={[
+              ["datasets", "feature-store"],
+              ["manage-tags"]
+            ]}
+            panels={[
+              { id: "datasets", label: "Datasets" },
+              { id: "feature-store", label: "Feature Store" },
+              { id: "manage-tags", label: "Manage Tags" }
+            ]}
+          >
             <section className="panel">
               <div className="panel-header">
                 <div>
@@ -838,6 +1315,10 @@ export default function App() {
                   Required columns: entity_id, ticker, sector, effective_at, known_at, ingested_at, source_version,
                   open/high/low/close, volume, ev_ebitda, roic, momentum_20d, momentum_60d, sentiment_1d,
                   sentiment_5d, macro_surprise, earnings_signal.
+                </small>
+                <small>
+                  Optional sidecar: `news_events.parquet` with raw headlines/bodies and PIT timestamps for ticker news
+                  plus macro/economic news embedding features.
                 </small>
               </div>
               <DenseTable
@@ -925,7 +1406,7 @@ export default function App() {
                 )}
               </div>
             </section>
-          </div>
+          </DashboardLayout>
         );
       case "Factor Lab":
         return (
@@ -952,7 +1433,18 @@ export default function App() {
         );
       case "Training Studio":
         return (
-          <div className="panel-grid">
+          <DashboardLayout
+            layoutKey="training-studio"
+            defaultRows={[
+              ["launch-training", "model-catalog"],
+              ["training-runs"]
+            ]}
+            panels={[
+              { id: "launch-training", label: "Launch Training" },
+              { id: "model-catalog", label: "Model Catalog" },
+              { id: "training-runs", label: "Training Runs" }
+            ]}
+          >
             <section className="panel">
               <div className="panel-header">
                 <div>
@@ -965,6 +1457,18 @@ export default function App() {
                 Queue training jobs with explicit data, features, model kind, and hyperparameters so the control panel
                 becomes the source of truth for run instantiation.
               </p>
+              {runtimeCapabilities ? (
+                <div className="inline-note">
+                  Runtime detects {Array.isArray(runtimeCapabilities.devices) ? runtimeCapabilities.devices.length : 0} device paths.
+                  Recommended target: {String(runtimeCapabilities.recommended_compute_target ?? "cpu")}.
+                </div>
+              ) : null}
+              {trainingForm.model_kind === "layered_decision" ? (
+                <div className="inline-note">
+                  Layered training will use the Master Control selections for each research layer, including model
+                  comparisons, preprocessing steps, and per-layer device/runtime preferences.
+                </div>
+              ) : null}
               <div className="control-form two-column">
                 <label>
                   <span>Run Name</span>
@@ -1022,12 +1526,50 @@ export default function App() {
                   <span>Horizon Days</span>
                   <input value={trainingForm.horizon_days} onChange={(event) => setTrainingForm((current) => ({ ...current, horizon_days: event.target.value }))} />
                 </label>
+                <label>
+                  <span>Compute Target</span>
+                  <select value={trainingForm.compute_target} onChange={(event) => setTrainingForm((current) => ({ ...current, compute_target: event.target.value }))}>
+                    {Array.isArray(runtimeCapabilities?.supported_compute_targets)
+                      ? (runtimeCapabilities.supported_compute_targets as string[]).map((target) => (
+                          <option key={target} value={target}>
+                            {target}
+                          </option>
+                        ))
+                      : <option value="auto">auto</option>}
+                  </select>
+                </label>
+                <label>
+                  <span>Precision</span>
+                  <select value={trainingForm.precision_mode} onChange={(event) => setTrainingForm((current) => ({ ...current, precision_mode: event.target.value }))}>
+                    {Array.isArray(runtimeCapabilities?.supported_precision_modes)
+                      ? (runtimeCapabilities.supported_precision_modes as string[]).map((mode) => (
+                          <option key={mode} value={mode}>
+                            {mode}
+                          </option>
+                        ))
+                      : <option value="auto">auto</option>}
+                  </select>
+                </label>
+                <label>
+                  <span>Batch Size</span>
+                  <input value={trainingForm.batch_size} onChange={(event) => setTrainingForm((current) => ({ ...current, batch_size: event.target.value }))} />
+                </label>
+                <label>
+                  <span>Sequence Length</span>
+                  <input value={trainingForm.sequence_length} onChange={(event) => setTrainingForm((current) => ({ ...current, sequence_length: event.target.value }))} />
+                </label>
+                <label>
+                  <span>Grad Clip</span>
+                  <input value={trainingForm.gradient_clip_norm} onChange={(event) => setTrainingForm((current) => ({ ...current, gradient_clip_norm: event.target.value }))} />
+                </label>
               </div>
               <div className="metric-grid compact">
                 <MetricCard label="Selected Dataset" value={trainingForm.dataset_version_id ? shortId(trainingForm.dataset_version_id) : "auto"} />
                 <MetricCard label="Selected Features" value={trainingForm.feature_set_version_id ? shortId(trainingForm.feature_set_version_id) : "auto"} />
                 <MetricCard label="Epoch Budget" value={trainingForm.epochs} />
                 <MetricCard label="Learning Rate" value={trainingForm.learning_rate} />
+                <MetricCard label="Compute Target" value={trainingForm.compute_target} />
+                <MetricCard label="Batch Size" value={trainingForm.batch_size} />
               </div>
             </section>
             <section className="panel">
@@ -1065,11 +1607,22 @@ export default function App() {
                 defaultSort={{ key: "updated", direction: "desc" }}
               />
             </section>
-          </div>
+          </DashboardLayout>
         );
       case "Testing Console":
         return (
-          <div className="panel-grid">
+          <DashboardLayout
+            layoutKey="testing-console"
+            defaultRows={[
+              ["launch-testing", "frozen-models"],
+              ["testing-runs"]
+            ]}
+            panels={[
+              { id: "launch-testing", label: "Launch Testing" },
+              { id: "frozen-models", label: "Frozen Models" },
+              { id: "testing-runs", label: "Testing Runs" }
+            ]}
+          >
             <section className="panel">
               <div className="panel-header">
                 <div>
@@ -1168,7 +1721,7 @@ export default function App() {
                 defaultSort={{ key: "updated", direction: "desc" }}
               />
             </section>
-          </div>
+          </DashboardLayout>
         );
       case "Risk Lab":
         return (
@@ -1254,25 +1807,137 @@ export default function App() {
       case "Monitoring":
       default:
         return (
-          <section className="panel">
-            <div className="panel-header">
-              <div>
-                <span className="panel-kicker">Phase 8</span>
-                <h2>Monitoring</h2>
+          <DashboardLayout
+            layoutKey="monitoring"
+            defaultRows={[["monitoring", "runtime-self-check"]]}
+            panels={[
+              { id: "monitoring", label: "Monitoring" },
+              { id: "runtime-self-check", label: "Runtime Self-Check" }
+            ]}
+          >
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Phase 8</span>
+                  <h2>Monitoring</h2>
+                </div>
               </div>
-            </div>
-            <p className="panel-copy">
-              Review control-plane health, recent performance, retrain triggers, and the last monitoring snapshot in one
-              place.
-            </p>
-            <div className="metric-grid">
-              <MetricCard label="Run Success" value={pretty(monitoring?.run_success_rate)} />
-              <MetricCard label="Retrain Triggers" value={pretty(monitoring?.retrain_trigger_count)} />
-              <MetricCard label="Latest Sharpe" value={pretty(monitoring?.latest_metrics?.sharpe)} />
-              <MetricCard label="Latest Rank IC" value={pretty(monitoring?.latest_metrics?.rank_ic)} />
-            </div>
-            <pre className="json-block">{JSON.stringify(monitoring, null, 2)}</pre>
-          </section>
+              <p className="panel-copy">
+                Review control-plane health, recent performance, retrain triggers, and the last monitoring snapshot in one
+                place.
+              </p>
+              <div className="metric-grid">
+                <MetricCard label="Run Success" value={pretty(monitoring?.run_success_rate)} />
+                <MetricCard label="Retrain Triggers" value={pretty(monitoring?.retrain_trigger_count)} />
+                <MetricCard label="Latest Sharpe" value={pretty(monitoring?.latest_metrics?.sharpe)} />
+                <MetricCard label="Latest Rank IC" value={pretty(monitoring?.latest_metrics?.rank_ic)} />
+              </div>
+              <pre className="json-block">{JSON.stringify(monitoring, null, 2)}</pre>
+            </section>
+            <section className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-kicker">Hardware Probe</span>
+                  <h2>Runtime Self-Check</h2>
+                </div>
+                <button onClick={runRuntimeSelfCheck} disabled={runtimeSelfCheckRunning}>
+                  {runtimeSelfCheckRunning ? "Running..." : "Run Self-Check"}
+                </button>
+              </div>
+              <p className="panel-copy">
+                Validate tensor allocation, forward pass, backward pass, and one optimizer step on the selected runtime
+                path before launching larger training jobs.
+              </p>
+              <div className="control-form two-column">
+                <label>
+                  <span>Compute Target</span>
+                  <select
+                    value={runtimeSelfCheckForm.compute_target}
+                    onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, compute_target: event.target.value }))}
+                  >
+                    {Array.isArray(runtimeCapabilities?.supported_compute_targets)
+                      ? (runtimeCapabilities.supported_compute_targets as string[]).map((target) => (
+                          <option key={target} value={target}>
+                            {target}
+                          </option>
+                        ))
+                      : <option value="auto">auto</option>}
+                  </select>
+                </label>
+                <label>
+                  <span>Precision</span>
+                  <select
+                    value={runtimeSelfCheckForm.precision_mode}
+                    onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, precision_mode: event.target.value }))}
+                  >
+                    {Array.isArray(runtimeCapabilities?.supported_precision_modes)
+                      ? (runtimeCapabilities.supported_precision_modes as string[]).map((mode) => (
+                          <option key={mode} value={mode}>
+                            {mode}
+                          </option>
+                        ))
+                      : <option value="auto">auto</option>}
+                  </select>
+                </label>
+                <label>
+                  <span>Model Kind</span>
+                  <select
+                    value={runtimeSelfCheckForm.model_kind}
+                    onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, model_kind: event.target.value }))}
+                  >
+                    <option value="pytorch_mlp">pytorch_mlp</option>
+                    <option value="gru">gru</option>
+                    <option value="temporal_cnn">temporal_cnn</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Input Dim</span>
+                  <input value={runtimeSelfCheckForm.input_dim} onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, input_dim: event.target.value }))} />
+                </label>
+                <label>
+                  <span>Batch Size</span>
+                  <input value={runtimeSelfCheckForm.batch_size} onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, batch_size: event.target.value }))} />
+                </label>
+                <label>
+                  <span>Sequence Length</span>
+                  <input value={runtimeSelfCheckForm.sequence_length} onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, sequence_length: event.target.value }))} />
+                </label>
+                <label>
+                  <span>Grad Clip</span>
+                  <input value={runtimeSelfCheckForm.gradient_clip_norm} onChange={(event) => setRuntimeSelfCheckForm((current) => ({ ...current, gradient_clip_norm: event.target.value }))} />
+                </label>
+              </div>
+              <div className="metric-grid compact">
+                <MetricCard label="Recommended" value={runtimeCapabilities?.recommended_compute_target ?? "cpu"} />
+                <MetricCard label="Result" value={runtimeSelfCheckResult ? (runtimeSelfCheckResult.success ? "pass" : "fail") : "not run"} />
+                <MetricCard label="Target Matched" value={runtimeSelfCheckResult ? (runtimeSelfCheckResult.requested_target_satisfied ? "yes" : "no") : "n/a"} />
+                <MetricCard label="Resolved Target" value={runtimeSelfCheckResult?.resolved_runtime?.resolved_compute_target ?? "n/a"} />
+                <MetricCard label="Elapsed ms" value={pretty(runtimeSelfCheckResult?.metrics?.elapsed_ms)} />
+              </div>
+              {Array.isArray(runtimeCapabilities?.notes) && runtimeCapabilities?.notes?.length ? (
+                <pre className="json-block compact-json">{JSON.stringify(runtimeCapabilities.notes, null, 2)}</pre>
+              ) : null}
+              {runtimeSelfCheckResult ? (
+                <>
+                  <div className="contract-grid">
+                    <article className="contract-card">
+                      <small>Checks</small>
+                      <p>{compactText(runtimeSelfCheckResult.checks, 180)}</p>
+                    </article>
+                    <article className="contract-card">
+                      <small>Resolved Runtime</small>
+                      <p>{compactText(runtimeSelfCheckResult.resolved_runtime, 180)}</p>
+                    </article>
+                    <article className="contract-card">
+                      <small>Errors</small>
+                      <p>{compactText(runtimeSelfCheckResult.errors ?? [], 180)}</p>
+                    </article>
+                  </div>
+                  <pre className="json-block">{JSON.stringify(runtimeSelfCheckResult, null, 2)}</pre>
+                </>
+              ) : null}
+            </section>
+          </DashboardLayout>
         );
     }
   }

@@ -8,10 +8,11 @@ import numpy as np
 import pandas as pd
 
 from ..config import REPORT_DIR, ensure_directories
+from ..research_layers import LAYER_FUSION_DECISION
 from .execution import simulate_execution
 from .features import load_feature_frame
 from .risk import annualized_metrics, bootstrap_drawdown_distribution, cholesky_stress, compute_var_cvar, student_t_tail_simulation
-from .training import load_predictor
+from .training import load_predictor_bundle
 
 
 @dataclass
@@ -30,12 +31,17 @@ def run_testing_suite(
     stress_iterations: int,
     rebalance_decile: float,
     execution_mode: str,
+    decision_top_k: int = 10,
 ) -> TestingResult:
     ensure_directories()
     frame = load_feature_frame(feature_set_id)
-    test_df = frame[frame["split"] == "test"].copy()
-    predictor = load_predictor(model_artifact_dir)
-    test_df["predicted_return"] = predictor(test_df)
+    predictor, layer_predictors, predictor_metadata = load_predictor_bundle(model_artifact_dir)
+    scored_frame = frame.copy()
+    for layer_id, layer_predictor in layer_predictors.items():
+        layer_name = str(layer_id).replace("layer_", "")
+        scored_frame[f"{layer_name}_score"] = layer_predictor(scored_frame)
+    scored_frame["predicted_return"] = predictor(scored_frame)
+    test_df = scored_frame[scored_frame["split"] == "test"].copy()
 
     portfolio_returns, trade_frame = _backtest_long_short(test_df, rebalance_decile)
     benchmark = trade_frame.groupby("effective_at")["forward_return"].mean()
@@ -77,6 +83,15 @@ def run_testing_suite(
     backtest_path.write_text(equity_curve.to_json(orient="records"), encoding="utf-8")
     execution_path = report_dir / "execution_timeline.json"
     execution_path.write_text(json.dumps(execution["timeline"], indent=2), encoding="utf-8")
+    decision_report_path = report_dir / "final_decision_report.json"
+    decision_report = _build_final_decision_report(
+        test_df=test_df,
+        metrics=metrics,
+        model_artifact_dir=model_artifact_dir,
+        predictor_metadata=predictor_metadata,
+        top_k=decision_top_k,
+    )
+    decision_report_path.write_text(json.dumps(decision_report, indent=2), encoding="utf-8")
     summary_path = report_dir / "summary.json"
     summary = {
         "rows": int(len(test_df)),
@@ -86,6 +101,7 @@ def run_testing_suite(
         "artifacts": {
             "equity_curve": str(backtest_path),
             "execution_timeline": str(execution_path),
+            "final_decision_report": str(decision_report_path),
             "summary": str(summary_path),
         },
     }
@@ -129,6 +145,30 @@ def run_testing_suite(
             "provenance": {"execution_path": str(execution_path)},
         },
     ]
+    if layer_predictors:
+        traces.append(
+            {
+                "formula_id": "phase6.fusion.decision",
+                "label": "Layered fusion decision report",
+                "inputs": {
+                    "layer_count": len(layer_predictors),
+                    "decision_top_k": decision_top_k,
+                },
+                "transformed_inputs": {
+                    "decision_date": decision_report["decision_date"],
+                    "score_columns": decision_report["score_columns"],
+                },
+                "output": {
+                    "top_long_ticker": decision_report["top_longs"][0]["ticker"] if decision_report["top_longs"] else None,
+                    "top_short_ticker": decision_report["top_shorts"][0]["ticker"] if decision_report["top_shorts"] else None,
+                },
+                "units": "decision_report",
+                "provenance": {
+                    "layer_id": LAYER_FUSION_DECISION,
+                    "decision_report_path": str(decision_report_path),
+                },
+            }
+        )
     return TestingResult(
         report_dir=report_dir,
         metrics=metrics,
@@ -136,6 +176,7 @@ def run_testing_suite(
         artifacts={
             "equity_curve": str(backtest_path),
             "execution_timeline": str(execution_path),
+            "final_decision_report": str(decision_report_path),
             "summary": str(summary_path),
         },
         traces=traces,
@@ -177,3 +218,45 @@ def _estimate_turnover(trades: pd.DataFrame) -> float:
 def _sector_neutrality_gap(trades: pd.DataFrame) -> float:
     sector_weights = trades.groupby("sector")["target_weight"].sum()
     return float(np.abs(sector_weights).mean())
+
+
+def _build_final_decision_report(
+    test_df: pd.DataFrame,
+    metrics: dict[str, float],
+    model_artifact_dir: str | Path,
+    predictor_metadata: dict[str, object],
+    top_k: int,
+) -> dict[str, object]:
+    score_columns = sorted(column for column in test_df.columns if column.endswith("_score"))
+    latest_effective_at = pd.to_datetime(test_df["effective_at"]).max()
+    latest_slice = test_df[pd.to_datetime(test_df["effective_at"]) == latest_effective_at].copy()
+    latest_slice = latest_slice.sort_values("predicted_return", ascending=False)
+    return {
+        "decision_date": str(latest_effective_at),
+        "model_kind": predictor_metadata.get("model_kind"),
+        "requested_model_kind": predictor_metadata.get("requested_model_kind"),
+        "model_artifact_dir": str(model_artifact_dir),
+        "score_columns": score_columns,
+        "layer_registry": predictor_metadata.get("layer_registry"),
+        "metrics": metrics,
+        "top_longs": _serialize_decision_rows(latest_slice.head(top_k), score_columns),
+        "top_shorts": _serialize_decision_rows(
+            latest_slice.tail(top_k).sort_values("predicted_return", ascending=True),
+            score_columns,
+        ),
+    }
+
+
+def _serialize_decision_rows(frame: pd.DataFrame, score_columns: list[str]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for _, row in frame.iterrows():
+        payload: dict[str, object] = {
+            "ticker": str(row["ticker"]),
+            "sector": str(row["sector"]),
+            "predicted_return": float(row["predicted_return"]),
+            "forward_return": float(row["forward_return"]),
+        }
+        for column in score_columns:
+            payload[column] = float(row[column])
+        rows.append(payload)
+    return rows
