@@ -149,13 +149,15 @@ python -m venv .venv
 pip install -e .[dev]
 ```
 
-Optional ML extras:
+Optional ML extras for a standard local environment:
 
 ```powershell
 pip install -e .[dev,ml]
 ```
 
 The `ml` extras enable LightGBM and PyTorch so training can use those libraries directly instead of the built-in sklearn fallbacks.
+
+For the WSL + ROCm setup below, do not use `.[dev,ml]`. Install the base app first, then install ROCm PyTorch and the optional WSL-safe extras separately.
 
 ### Frontend
 
@@ -230,19 +232,37 @@ If you want the training backend to run in a dedicated Linux ROCm environment wh
 High-level flow:
 
 1. install WSL with Ubuntu 22.04 or 24.04
-2. install the AMD WSL driver on Windows
+2. install or confirm a Windows Adrenalin driver supported by AMD's current WSL guide
 3. install the Windows SDK on Windows
-4. install the ROCm + ROCDXG WSL stack inside Ubuntu
-5. create the app env inside WSL
-6. install ROCm PyTorch wheels in that env
-7. optionally install LightGBM and Transformers into that env
-8. launch the backend in WSL and the frontend on Windows
+4. sync the repo into the WSL Linux filesystem
+5. install the ROCm + ROCDXG WSL stack inside Ubuntu
+6. create the app env inside WSL
+7. install ROCm PyTorch wheels in that env
+8. optionally install LightGBM and Transformers into that env
+9. launch the backend in WSL and the frontend on Windows
 
 Repo helpers:
 
 ```powershell
 # From Windows, after Ubuntu WSL is installed
 scripts\start-wsl-rocm.ps1 -Distro Ubuntu-24.04
+```
+
+Recommended WSL repo sync:
+
+```bash
+sudo apt update
+sudo apt install -y rsync
+
+rsync -a --info=progress2 \
+  --exclude '.git' \
+  --exclude '.venv' \
+  --exclude '.pytest_cache' \
+  --exclude 'artifacts' \
+  /mnt/c/ksong/Projects/modeltrainer/ \
+  ~/modeltrainer/
+
+cd ~/modeltrainer
 ```
 
 Inside WSL:
@@ -260,10 +280,11 @@ Important notes:
 
 - Use `pip install -e .[dev]` for the app env inside WSL, not `.[dev,ml]`, because the generic `ml` extras would replace ROCm wheels with the wrong torch build.
 - To add optional model libraries after ROCm PyTorch is installed, use `./scripts/wsl_rocm/install_optional_ml.sh` or `pip install -e .[ml-runtime]`. Both paths avoid reinstalling torch.
+- Keep the repo in the WSL Linux filesystem such as `~/modeltrainer` for better performance. Use `rsync` to refresh it after changes on the Windows side.
 - The WSL launcher script starts the backend with `QUANT_PLATFORM_HOST=0.0.0.0` so the Windows frontend can reach it through `http://127.0.0.1:<port>`.
 - The current helper now follows AMD's ROCDXG-based WSL flow. It installs base ROCm userspace packages in WSL, builds `librocdxg`, and exports `HSA_ENABLE_DXG_DETECTION=1` for verification and backend startup.
 - The helper expects a Windows SDK include path visible from WSL, usually `/mnt/c/Program Files (x86)/Windows Kits/10/Include/<version>`. You can override detection with `WIN_SDK_PATH=/mnt/c/.../Include/<version>`.
-- On this machine today, WSL only has `docker-desktop` registered, so you still need to install a real Ubuntu distro before the ROCm launcher will work.
+- Create `frontend/.env.local` with `VITE_API_BASE_URL=http://127.0.0.1:8000` if you want the frontend to remember the backend URL without setting a shell variable every time.
 
 Official references:
 
