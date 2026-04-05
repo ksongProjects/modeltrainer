@@ -22,6 +22,23 @@ const WINDOW_DAYS: Record<string, number | null> = {
 };
 
 const LAYER_COLORS = ["#ff8f70", "#7fd4ff", "#f4d35e", "#a2ff95", "#f7aef8", "#99b3ff"];
+type PricePoint = JsonRecord & {
+  closeValue: number | null;
+  highValue: number | null;
+  lowValue: number | null;
+  time: number | null;
+  volumeValue: number | null;
+};
+type PredictionPoint = JsonRecord & {
+  forwardValue: number | null;
+  predictedValue: number | null;
+  time: number | null;
+};
+type NewsPoint = JsonRecord & { time: number | null };
+type EventMarkerPoint = JsonRecord & {
+  numericValue: number | null;
+  time: number | null;
+};
 
 function toTime(value: unknown): number | null {
   if (typeof value !== "string") {
@@ -81,7 +98,7 @@ export function DatasetChart({
     const layerScoreColumns = Array.isArray(payload.layer_score_columns) ? (payload.layer_score_columns as JsonRecord[]) : [];
 
     const priceSeries = rawPriceSeries
-      .map((item) => ({
+      .map((item): PricePoint => ({
         ...item,
         time: toTime(item.effective_at),
         closeValue: toNumber(item.close),
@@ -89,31 +106,31 @@ export function DatasetChart({
         highValue: toNumber(item.high),
         volumeValue: toNumber(item.volume)
       }))
-      .filter((item) => item.time !== null && item.closeValue !== null);
+      .filter((item): item is PricePoint => item.time !== null && item.closeValue !== null);
 
     const predictionSeries = rawPredictionSeries
-      .map((item) => ({
+      .map((item): PredictionPoint => ({
         ...item,
         time: toTime(item.effective_at),
         predictedValue: toNumber(item.predicted_return),
         forwardValue: toNumber(item.forward_return)
       }))
-      .filter((item) => item.time !== null);
+      .filter((item): item is PredictionPoint => item.time !== null);
 
     const newsEvents = rawNewsEvents
-      .map((item) => ({
+      .map((item): NewsPoint => ({
         ...item,
         time: toTime(item.known_at)
       }))
-      .filter((item) => item.time !== null);
+      .filter((item): item is NewsPoint => item.time !== null);
 
     const eventMarkers = rawEventMarkers
-      .map((item) => ({
+      .map((item): EventMarkerPoint => ({
         ...item,
         time: toTime(item.effective_at),
         numericValue: toNumber(item.value)
       }))
-      .filter((item) => item.time !== null);
+      .filter((item): item is EventMarkerPoint => item.time !== null);
 
     const allTimes = [
       ...priceSeries.map((item) => item.time as number),
@@ -372,13 +389,23 @@ export function DatasetChart({
       </svg>
 
       <div className="chart-legend">
-        <span className="chart-legend-item"><i className="price" />Price</span>
-        <span className="chart-legend-item"><i className="predicted" />Predicted Return</span>
-        <span className="chart-legend-item"><i className="actual" />Realized Forward Return</span>
-        <span className="chart-legend-item"><i className="ticker-news" />Ticker News</span>
-        <span className="chart-legend-item"><i className="macro-news" />Macro News</span>
-        <span className="chart-legend-item"><i className="earnings" />Earnings</span>
-        <span className="chart-legend-item"><i className="macro-surprise" />Macro Surprise</span>
+        {overlayState.price ? <span className="chart-legend-item"><i className="price" />Price</span> : null}
+        {overlayState.volume ? <span className="chart-legend-item"><i className="volume" />Volume</span> : null}
+        {overlayState.predicted ? <span className="chart-legend-item"><i className="predicted" />Predicted Return</span> : null}
+        {overlayState.actual ? <span className="chart-legend-item"><i className="actual" />Realized Forward Return</span> : null}
+        {overlayState.news ? <span className="chart-legend-item"><i className="ticker-news" />Ticker News</span> : null}
+        {overlayState.macro_news ? <span className="chart-legend-item"><i className="macro-news" />Macro News</span> : null}
+        {overlayState.earnings ? <span className="chart-legend-item"><i className="earnings" />Earnings</span> : null}
+        {overlayState.macro_surprise ? <span className="chart-legend-item"><i className="macro-surprise" />Macro Surprise</span> : null}
+        {overlayState.sentiment_shock ? <span className="chart-legend-item"><i className="sentiment-shock" />Sentiment Shock</span> : null}
+        {derived.layerPaths
+          .filter((item) => overlayState[item.key])
+          .map((item) => (
+            <span key={`legend-${item.key}`} className="chart-legend-item">
+              <i style={{ background: item.color, borderColor: item.color }} />
+              {item.label}
+            </span>
+          ))}
       </div>
     </div>
   );

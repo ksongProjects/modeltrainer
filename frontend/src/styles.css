@@ -1185,6 +1185,219 @@ select {
   background: rgba(255, 255, 255, 0.015);
 }
 
+.chart-panel-stack {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.chart-toggle-block {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.chart-toggle-block > span {
+  font-size: 0.62rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dataset-chart-shell {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(99, 210, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    rgba(8, 11, 16, 0.92);
+}
+
+.dataset-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid rgba(99, 210, 255, 0.18);
+  background: linear-gradient(180deg, rgba(9, 12, 17, 0.92), rgba(15, 20, 28, 0.96));
+}
+
+.chart-empty {
+  padding: 0.85rem;
+  border: 1px dashed rgba(99, 210, 255, 0.28);
+  background: rgba(99, 210, 255, 0.05);
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.chart-plot-frame {
+  fill: rgba(8, 11, 16, 0.52);
+  stroke: rgba(99, 210, 255, 0.24);
+  stroke-width: 1;
+}
+
+.chart-zero-line {
+  stroke: rgba(241, 184, 96, 0.55);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+}
+
+.chart-volume-bar {
+  fill: rgba(99, 210, 255, 0.28);
+}
+
+.chart-price-line,
+.chart-predicted-line,
+.chart-actual-line,
+.chart-layer-line {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-price-line {
+  stroke: #63d2ff;
+  stroke-width: 2.1;
+}
+
+.chart-predicted-line {
+  stroke: #f1b860;
+  stroke-width: 1.8;
+}
+
+.chart-actual-line {
+  stroke: #72f0b4;
+  stroke-width: 1.6;
+  stroke-dasharray: 5 4;
+}
+
+.chart-layer-line {
+  stroke-width: 1.35;
+  opacity: 0.94;
+}
+
+.chart-news-line,
+.chart-macro-line,
+.chart-event-line {
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.chart-news-line {
+  stroke: rgba(99, 210, 255, 0.3);
+}
+
+.chart-macro-line {
+  stroke: rgba(241, 184, 96, 0.34);
+}
+
+.chart-event-line {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+
+.chart-news-dot {
+  stroke: #081016;
+  stroke-width: 1.5;
+}
+
+.chart-news-dot.ticker-news {
+  fill: #63d2ff;
+}
+
+.chart-news-dot.macro-news {
+  fill: #f1b860;
+}
+
+.chart-event-box {
+  stroke: #081016;
+  stroke-width: 1.2;
+}
+
+.chart-event-box.earnings {
+  fill: #72f0b4;
+}
+
+.chart-event-box.macro-surprise {
+  fill: #f1b860;
+}
+
+.chart-event-box.sentiment_shock {
+  fill: #ff8f70;
+}
+
+.chart-axis-label {
+  fill: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+}
+
+.chart-axis-label.right {
+  text-anchor: start;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.75rem;
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.chart-legend-item i {
+  display: inline-block;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 1px solid transparent;
+  background: currentColor;
+}
+
+.chart-legend-item i.price {
+  background: #63d2ff;
+}
+
+.chart-legend-item i.volume {
+  background: rgba(99, 210, 255, 0.28);
+  border-color: rgba(99, 210, 255, 0.45);
+}
+
+.chart-legend-item i.predicted {
+  background: #f1b860;
+}
+
+.chart-legend-item i.actual {
+  background: #72f0b4;
+}
+
+.chart-legend-item i.ticker-news,
+.chart-legend-item i.macro-news {
+  border-radius: 999px;
+}
+
+.chart-legend-item i.ticker-news {
+  background: #63d2ff;
+}
+
+.chart-legend-item i.macro-news {
+  background: #f1b860;
+}
+
+.chart-legend-item i.earnings {
+  background: #72f0b4;
+}
+
+.chart-legend-item i.macro-surprise {
+  background: #f1b860;
+}
+
+.chart-legend-item i.sentiment-shock {
+  background: #ff8f70;
+}
+
 .factor-card pre,
 .trace-card pre,
 .json-block {

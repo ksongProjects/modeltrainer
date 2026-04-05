@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 
 
+def _finite_float(value: object, default: float = 0.0) -> float:
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else default
+
+
 def compute_var_cvar(returns: pd.Series, alpha: float = 0.95) -> tuple[float, float]:
     cutoff = np.quantile(returns, 1 - alpha)
     tail = returns[returns <= cutoff]
@@ -17,14 +22,15 @@ def max_drawdown(cumulative_returns: pd.Series) -> float:
 
 
 def annualized_metrics(returns: pd.Series, benchmark: pd.Series | None = None) -> dict[str, float]:
-    daily_mean = returns.mean()
-    daily_vol = returns.std(ddof=0)
-    annual_return = float((1 + daily_mean) ** 252 - 1)
-    annual_vol = float(daily_vol * np.sqrt(252))
-    downside_vol = float(returns[returns < 0].std(ddof=0) * np.sqrt(252) or 0.0)
+    daily_mean = _finite_float(returns.mean())
+    daily_vol = _finite_float(returns.std(ddof=0))
+    annual_return = _finite_float((1 + daily_mean) ** 252 - 1)
+    annual_vol = _finite_float(daily_vol * np.sqrt(252))
+    downside_std = _finite_float(returns[returns < 0].std(ddof=0))
+    downside_vol = _finite_float(downside_std * np.sqrt(252))
     sharpe = float((daily_mean * 252) / annual_vol) if annual_vol else 0.0
     sortino = float((daily_mean * 252) / downside_vol) if downside_vol else 0.0
-    hit_rate = float((returns > 0).mean())
+    hit_rate = _finite_float((returns > 0).mean())
     cumulative = (1 + returns).cumprod()
     metrics = {
         "annualized_return": annual_return,
@@ -36,12 +42,13 @@ def annualized_metrics(returns: pd.Series, benchmark: pd.Series | None = None) -
     }
     if benchmark is not None and len(benchmark) == len(returns):
         active = returns - benchmark
-        tracking_error = float(active.std(ddof=0) * np.sqrt(252))
+        tracking_error = _finite_float(active.std(ddof=0) * np.sqrt(252))
         information_ratio = float((active.mean() * 252) / tracking_error) if tracking_error else 0.0
-        beta = float(np.cov(returns, benchmark)[0, 1] / np.var(benchmark)) if np.var(benchmark) else 0.0
+        benchmark_var = _finite_float(np.var(benchmark))
+        beta = _finite_float(np.cov(returns, benchmark)[0, 1] / benchmark_var) if benchmark_var else 0.0
         metrics["information_ratio"] = information_ratio
         metrics["beta"] = beta
-        metrics["benchmark_alpha"] = float((returns.mean() - benchmark.mean()) * 252)
+        metrics["benchmark_alpha"] = _finite_float((returns.mean() - benchmark.mean()) * 252)
     else:
         metrics["information_ratio"] = 0.0
         metrics["beta"] = 0.0

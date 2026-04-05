@@ -756,6 +756,7 @@ export default function App() {
   }
 
   async function startTraining() {
+    if (!trainingHasDataInput) return;
     const response = await api.post<JsonRecord>("/api/training-runs", {
       name: trainingForm.name.trim() || "Master Control Training",
       model_kind: trainingForm.model_kind,
@@ -925,11 +926,15 @@ export default function App() {
   const chartTickerOptions = useMemo(() => {
     const payloadTickers = Array.isArray(chartPayload?.tickers) ? chartPayload.tickers : [];
     if (payloadTickers.length) {
-      return payloadTickers.map((ticker) => String(ticker)).filter(Boolean);
+      return payloadTickers.map((ticker: unknown) => String(ticker)).filter(Boolean);
+    }
+
+    if (typeof chartPayload?.ticker === "string" && chartPayload.ticker) {
+      return [chartPayload.ticker];
     }
 
     const summaryTickers = Array.isArray(selectedDataset?.summary?.tickers) ? selectedDataset.summary.tickers : [];
-    return summaryTickers.map((ticker) => String(ticker)).filter(Boolean);
+    return summaryTickers.map((ticker: unknown) => String(ticker)).filter(Boolean);
   }, [chartPayload, selectedDataset]);
   const chartPriceRowCount = Array.isArray(chartPayload?.price_series) ? chartPayload.price_series.length : 0;
   const chartPredictionRowCount = Array.isArray(chartPayload?.prediction_series) ? chartPayload.prediction_series.length : 0;
@@ -1082,7 +1087,7 @@ export default function App() {
       sortable: true,
       sortValue: (dataset) => String(dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? ""),
       filterValue: (dataset) => String(dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? ""),
-      render: (dataset) => dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? "generated locally"
+      render: (dataset) => dataset.summary?.artifacts?.source_path ?? dataset.summary?.artifacts?.raw_path ?? "source path unavailable"
     },
     {
       key: "news_rows",
@@ -1756,12 +1761,16 @@ export default function App() {
                     <div className="control-form two-column">
                       <label>
                         <span>Ticker</span>
-                        <select value={chartTicker} onChange={(event) => setChartTicker(event.target.value)}>
-                          {chartTickerOptions.map((ticker) => (
-                            <option key={ticker} value={ticker}>
-                              {ticker}
-                            </option>
-                          ))}
+                        <select value={chartTicker} onChange={(event) => setChartTicker(event.target.value)} disabled={!chartTickerOptions.length}>
+                          {chartTickerOptions.length ? (
+                            chartTickerOptions.map((ticker: string) => (
+                              <option key={ticker} value={ticker}>
+                                {ticker}
+                              </option>
+                            ))
+                          ) : (
+                            <option value="">Loading tickers</option>
+                          )}
                         </select>
                       </label>
                       <label>
@@ -1839,6 +1848,8 @@ export default function App() {
                     {chartLoading ? <div className="inline-note">Refreshing chart data for the selected inputs.</div> : null}
                     {chartError ? (
                       <EmptyState title="Chart unavailable" body={chartError} />
+                    ) : chartLoading && !chartPayload ? (
+                      <div className="chart-empty">Loading the selected dataset timeline.</div>
                     ) : (
                       <>
                         <DatasetChart payload={chartPayload} overlayState={chartOverlays} windowMode={chartWindow} />
@@ -1976,7 +1987,7 @@ export default function App() {
                   <span className="panel-kicker">Phase 3</span>
                   <h2>Launch Training</h2>
                 </div>
-                <button onClick={startTraining}>Start Training</button>
+                <button onClick={startTraining} disabled={!trainingHasDataInput}>Start Training</button>
               </div>
               <p className="panel-copy">
                 Queue training jobs with explicit data, features, model kind, and hyperparameters so the control panel

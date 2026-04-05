@@ -50,6 +50,22 @@ class TrainingResult:
     layer_comparisons: dict[str, dict[str, Any]] | None = None
 
 
+class ConstantProbabilityModel:
+    def __init__(self, positive_probability: float):
+        self.positive_probability = float(np.clip(positive_probability, 0.0, 1.0))
+
+    def predict_proba(self, inputs: np.ndarray) -> np.ndarray:
+        rows = len(inputs)
+        positive = np.full(rows, self.positive_probability, dtype=float)
+        negative = 1.0 - positive
+        return np.column_stack([negative, positive])
+
+
+def _finite_metric(value: object, default: float = 0.0) -> float:
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else default
+
+
 def train_model(
     model_version_id: str,
     feature_set_id: str,
@@ -113,8 +129,12 @@ def train_model(
         predictions = model.predict(X_val)
     elif resolved_kind == "logistic_fusion":
         y_train_cls = (y_train > 0).astype(int)
-        model = LogisticRegression(max_iter=200)
-        model.fit(X_train_scaled, y_train_cls)
+        if pd.Series(y_train_cls).nunique() < 2:
+            warnings.append("logistic_fusion received a single-class target; using a constant probability baseline.")
+            model = ConstantProbabilityModel(float(pd.Series(y_train_cls).mean()))
+        else:
+            model = LogisticRegression(max_iter=200)
+            model.fit(X_train_scaled, y_train_cls)
         if runtime_settings["compute_target"] not in {"auto", "cpu"}:
             warnings.append(f"{resolved_kind} currently trains on CPU; requested compute target `{runtime_settings['compute_target']}` was ignored.")
         checkpoint_paths = _save_pickle_checkpoint(model, scaler, checkpoint_dir / "checkpoint_epoch_1.pkl")
@@ -408,14 +428,14 @@ def _cpu_runtime_summary(runtime_settings: dict[str, Any], extra_note: str | Non
 
 
 def _compute_metrics(y_true: np.ndarray, predictions: np.ndarray) -> dict[str, float]:
-    rmse = float(np.sqrt(mean_squared_error(y_true, predictions)))
-    mae = float(mean_absolute_error(y_true, predictions))
-    directional_accuracy = float((np.sign(predictions) == np.sign(y_true)).mean())
+    rmse = _finite_metric(np.sqrt(mean_squared_error(y_true, predictions)))
+    mae = _finite_metric(mean_absolute_error(y_true, predictions))
+    directional_accuracy = _finite_metric((np.sign(predictions) == np.sign(y_true)).mean())
     prediction_series = pd.Series(predictions)
     truth_series = pd.Series(y_true)
-    rank_ic = float(prediction_series.rank().corr(truth_series.rank(), method="pearson") or 0.0)
-    spearman = float(prediction_series.corr(truth_series, method="spearman") or 0.0)
-    calibration_gap = float(abs(prediction_series.mean() - truth_series.mean()))
+    rank_ic = _finite_metric(prediction_series.rank().corr(truth_series.rank(), method="pearson"))
+    spearman = _finite_metric(prediction_series.corr(truth_series, method="spearman"))
+    calibration_gap = _finite_metric(abs(prediction_series.mean() - truth_series.mean()))
     return {
         "rmse": rmse,
         "mae": mae,

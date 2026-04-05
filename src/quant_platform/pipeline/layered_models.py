@@ -51,6 +51,22 @@ class IdentityScaler:
     def transform(self, frame: pd.DataFrame) -> np.ndarray:
         return np.asarray(frame, dtype=float)
 
+
+class ConstantProbabilityModel:
+    def __init__(self, positive_probability: float):
+        self.positive_probability = float(np.clip(positive_probability, 0.0, 1.0))
+
+    def predict_proba(self, inputs: np.ndarray) -> np.ndarray:
+        rows = len(inputs)
+        positive = np.full(rows, self.positive_probability, dtype=float)
+        negative = 1.0 - positive
+        return np.column_stack([negative, positive])
+
+
+def _finite_metric(value: object, default: float = 0.0) -> float:
+    numeric = float(value)
+    return numeric if np.isfinite(numeric) else default
+
 LAYER_FEATURES: dict[str, list[str]] = {
     LAYER_PRICE_SIGNAL: [
         "open",
@@ -542,8 +558,13 @@ def _train_single_layer_model(
         if runtime_settings["compute_target"] not in {"auto", "cpu"}:
             warnings.append(f"{resolved_model_kind} currently trains on CPU; requested compute target `{runtime_settings['compute_target']}` was ignored.")
     elif resolved_model_kind == "logistic_fusion":
-        model = LogisticRegression(max_iter=200)
-        model.fit(X_train_scaled, (y_train > 0).astype(int))
+        y_train_cls = (y_train > 0).astype(int)
+        if pd.Series(y_train_cls).nunique() < 2:
+            warnings.append(f"{layer_name} received a single-class target; using a constant probability baseline.")
+            model = ConstantProbabilityModel(float(pd.Series(y_train_cls).mean()))
+        else:
+            model = LogisticRegression(max_iter=200)
+            model.fit(X_train_scaled, y_train_cls)
         predictions = model.predict_proba(X_eval_scaled)[:, 1] - 0.5
         if runtime_settings["compute_target"] not in {"auto", "cpu"}:
             warnings.append(f"{resolved_model_kind} currently trains on CPU; requested compute target `{runtime_settings['compute_target']}` was ignored.")
@@ -964,14 +985,14 @@ def _train_lightgbm_like(X_train: pd.DataFrame, y_train: pd.Series, config: dict
 
 
 def _compute_metrics(y_true: np.ndarray, predictions: np.ndarray) -> dict[str, float]:
-    rmse = float(np.sqrt(mean_squared_error(y_true, predictions)))
-    mae = float(mean_absolute_error(y_true, predictions))
-    directional_accuracy = float((np.sign(predictions) == np.sign(y_true)).mean())
+    rmse = _finite_metric(np.sqrt(mean_squared_error(y_true, predictions)))
+    mae = _finite_metric(mean_absolute_error(y_true, predictions))
+    directional_accuracy = _finite_metric((np.sign(predictions) == np.sign(y_true)).mean())
     prediction_series = pd.Series(predictions)
     truth_series = pd.Series(y_true)
-    rank_ic = float(prediction_series.rank().corr(truth_series.rank(), method="pearson") or 0.0)
-    spearman = float(prediction_series.corr(truth_series, method="spearman") or 0.0)
-    calibration_gap = float(abs(prediction_series.mean() - truth_series.mean()))
+    rank_ic = _finite_metric(prediction_series.rank().corr(truth_series.rank(), method="pearson"))
+    spearman = _finite_metric(prediction_series.corr(truth_series, method="spearman"))
+    calibration_gap = _finite_metric(abs(prediction_series.mean() - truth_series.mean()))
     return {
         "rmse": rmse,
         "mae": mae,
